@@ -66,6 +66,7 @@ The single global match view was replaced with a vertical stack of independent "
 - Scoped sessions: work one build-order step at a time. Stop and summarize before starting the next step unless explicitly told to continue.
 - Prefer clarity/maintainability over premature optimization — this is a solo long-term project, not a performance-critical app.
 - Solo git workflow: commit directly to `main` for all build-order steps. Do not create feature branches or open pull requests unless explicitly asked.
+- End-of-session deliverables: every session ends with (1) a written summary of what was done, and (2) a plain-text description of the current UI state as observed via the browser preview tool (what's rendered, what changed visually) — even without a screenshot, so the user can relay it to another reviewer.
 
 ## Maintenance
 After any session that completes a meaningful chunk of work (a full build-order step, a significant architecture decision, or a notable deviation from the plan above), **regenerate this file**: update the checkboxes, add any new conventions or architecture decisions actually made, and note deviations from the original brief. Keep it concise — this file should always reflect current reality, not the full history of how it got there.
