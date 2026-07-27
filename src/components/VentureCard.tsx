@@ -3,6 +3,7 @@ import {
   SOCCER_VENTURE_TIERS,
   DEFAULT_SOCCER_CONFIG,
   tierUpgradeCost,
+  tierPerTickRevenue,
   getOutcome,
 } from '../sports/soccer/soccerModule'
 import { calculateMatchRevenue } from '../engine/economy'
@@ -47,6 +48,7 @@ function VentureCard({ tierId }: VentureCardProps) {
   }
 
   const upgradeCost = tierUpgradeCost(config, tier.level)
+  const perTickRevenue = tierPerTickRevenue(config, tier.level)
 
   // Purely presentational: derived from state already in the store, using
   // the exact same getOutcome()/calculateMatchRevenue() the engine uses at
@@ -80,13 +82,14 @@ function VentureCard({ tierId }: VentureCardProps) {
       <button type="button" onClick={() => tickTier(tierId)}>
         Push the Attack
       </button>
+      <p>+{perTickRevenue} Revenue per push</p>
 
       <button
         type="button"
         onClick={() => upgradeTier(tierId)}
         disabled={revenue < upgradeCost}
       >
-        Improve Training (costs {upgradeCost} Revenue)
+        Improve Training ({Math.min(revenue, upgradeCost)}/{upgradeCost} Revenue)
       </button>
 
       {tier.managerHired ? (
@@ -97,7 +100,7 @@ function VentureCard({ tierId }: VentureCardProps) {
           onClick={() => hireManagerForTier(tierId)}
           disabled={revenue < config.managerHireCost}
         >
-          Hire a Manager (costs {config.managerHireCost} Revenue)
+          Hire a Manager ({Math.min(revenue, config.managerHireCost)}/{config.managerHireCost} Revenue)
         </button>
       )}
     </div>

@@ -135,7 +135,7 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
     id: 'local-tournament',
     name: 'Local Tournament',
     baseRevenueMultiplier: 4,
-    unlockThreshold: 600,
+    unlockThreshold: 450,
     managerHireCost: 500,
     upgradeBaseCost: 300,
     upgradeCostGrowth: 1.6,
@@ -144,7 +144,7 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
     id: 'regional-championship',
     name: 'Regional Championship',
     baseRevenueMultiplier: 12,
-    unlockThreshold: 3000,
+    unlockThreshold: 2250,
     managerHireCost: 2500,
     upgradeBaseCost: 1200,
     upgradeCostGrowth: 1.65,
@@ -153,7 +153,7 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
     id: 'national-league',
     name: 'National League',
     baseRevenueMultiplier: 35,
-    unlockThreshold: 15000,
+    unlockThreshold: 11250,
     managerHireCost: 12000,
     upgradeBaseCost: 5000,
     upgradeCostGrowth: 1.7,
@@ -163,4 +163,19 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
 /** Revenue cost to raise a tier currently at `currentLevel` to the next level. */
 export function tierUpgradeCost(config: SoccerVentureTierConfig, currentLevel: number): number {
   return Math.round(config.upgradeBaseCost * config.upgradeCostGrowth ** (currentLevel - 1))
+}
+
+/** Base direct Revenue granted per tick (manual click or automated) at
+ *  multiplier=1, level=1, before tier/level scaling. Tuned so a brand-new
+ *  Local Game player reaches their first affordable purchase (Improve
+ *  Training, cost 100) in ~25s at an assumed 1 click/sec manual pace. */
+export const BASE_PER_TICK_REVENUE = 4
+
+/** Direct Revenue granted for a single tick at this tier/level — the
+ *  "clicking is the primary generator" amount, added every tick (manual or
+ *  auto) on top of the existing match-completion bonus. Scales by the same
+ *  baseRevenueMultiplier * level factor the completion bonus already uses,
+ *  so relative tier/level progression stays consistent between the two. */
+export function tierPerTickRevenue(config: SoccerVentureTierConfig, level: number): number {
+  return Math.round(BASE_PER_TICK_REVENUE * config.baseRevenueMultiplier * level)
 }

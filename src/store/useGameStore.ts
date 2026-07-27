@@ -7,6 +7,7 @@ import {
   type SoccerMatchState,
   SOCCER_VENTURE_TIERS,
   tierUpgradeCost,
+  tierPerTickRevenue,
 } from '../sports/soccer/soccerModule'
 
 // Single module-scoped instance of the currently plugged-in sport. Every
@@ -47,8 +48,11 @@ function createInitialTiers(): VentureTier[] {
 }
 
 // Re-checks every locked tier's unlock threshold against its immediately
-// preceding tier's cumulative revenue. Called after any tier's
-// cumulativeRevenue changes (i.e. after that tier completes a match).
+// preceding tier's cumulative revenue. Called after every tick's tiers
+// update (not only on match completion) — direct per-tick revenue now
+// accrues into cumulativeRevenue on every tick, so a threshold can be
+// crossed mid-match and must be picked up immediately, not just at the
+// 90th tick.
 function applyTierUnlocks(tiers: VentureTier[]): VentureTier[] {
   return tiers.map((tier, index) => {
     if (tier.unlocked || index === 0) return tier
@@ -92,10 +96,17 @@ export const useGameStore = create<GameState>()(
         const { state: nextMatch } = advanceTick(soccerModule, tier.match, tier.tickIndex)
         const nextTickIndex = tier.tickIndex + 1
 
+        // Direct per-tick Revenue: the primary generator, granted identically
+        // whether this tick was triggered by a manual "Push the Attack" click
+        // or the auto-play interval — same tickTier() path, no fork. This is
+        // on top of (never instead of) the match-completion bonus below.
+        const config = SOCCER_VENTURE_TIERS[tierIndex]
+        const perTickRevenue = tierPerTickRevenue(config, tier.level)
+
         if (isMatchComplete(soccerModule, nextTickIndex)) {
           const { outcome, revenue: baseRevenue } = finalizeMatch(soccerModule, nextMatch)
-          const config = SOCCER_VENTURE_TIERS[tierIndex]
-          const earnedRevenue = Math.round(baseRevenue * config.baseRevenueMultiplier * tier.level)
+          const completionBonus = Math.round(baseRevenue * config.baseRevenueMultiplier * tier.level)
+          const totalEarned = perTickRevenue + completionBonus
 
           set((s) => {
             const updatedTiers = s.tiers.map((t, i) =>
@@ -105,22 +116,33 @@ export const useGameStore = create<GameState>()(
                     match: soccerModule.createInitialState(),
                     tickIndex: 0,
                     matchesCompleted: t.matchesCompleted + 1,
-                    cumulativeRevenue: t.cumulativeRevenue + earnedRevenue,
+                    cumulativeRevenue: t.cumulativeRevenue + totalEarned,
                     lastOutcome: outcome,
                   }
                 : t,
             )
             return {
               tiers: applyTierUnlocks(updatedTiers),
-              currencies: { revenue: s.currencies.revenue + earnedRevenue },
+              currencies: { revenue: s.currencies.revenue + totalEarned },
             }
           })
         } else {
-          set((s) => ({
-            tiers: s.tiers.map((t, i) =>
-              i === tierIndex ? { ...t, match: nextMatch, tickIndex: nextTickIndex } : t,
-            ),
-          }))
+          set((s) => {
+            const updatedTiers = s.tiers.map((t, i) =>
+              i === tierIndex
+                ? {
+                    ...t,
+                    match: nextMatch,
+                    tickIndex: nextTickIndex,
+                    cumulativeRevenue: t.cumulativeRevenue + perTickRevenue,
+                  }
+                : t,
+            )
+            return {
+              tiers: applyTierUnlocks(updatedTiers),
+              currencies: { revenue: s.currencies.revenue + perTickRevenue },
+            }
+          })
         }
       },
 
