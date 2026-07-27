@@ -18,9 +18,17 @@ A multi-sport idle/incremental franchise management game. Browser-first (React +
 - **v1 ships with exactly 2 sports.** Do not add a 3rd sport until the shared engine has been validated with 2 working end-to-end.
 - Keep save/economy logic isolated in its own module — not scattered across UI components.
 
+### Engine / sport-module split (established in step 2)
+- `src/engine/types.ts` defines the sport-agnostic contract: `MatchOutcome` ('win'/'draw'/'loss'), `TickResult<TState>`, `MatchResult<TState>`, and the `SportModule<TState>` interface (`id`, `ticksPerMatch`, `createInitialState()`, `tick(state, tickIndex)`, `getOutcome(state)`). `TState` is fully opaque to the engine — sport modules own their own state shape.
+- `src/engine/tickEngine.ts` holds three pure, timer-free helper functions (`advanceTick`, `isMatchComplete`, `finalizeMatch`) that operate generically over any `SportModule<TState>`. It must never import from `src/sports/**` or reference sport-specific vocabulary.
+- `src/engine/economy.ts` is the single isolated home for currency math — a `REVENUE_BY_OUTCOME` table keyed only on the generic `MatchOutcome`, shared by every sport rather than redefined per sport.
+- A sport plugs in by implementing `SportModule<TState>` in its own folder under `src/sports/<sport>/` (see `src/sports/soccer/soccerModule.ts`) — that's the only place sport-specific vocabulary (goals, possession, shots, etc.) is allowed to appear.
+- The idle loop's `setInterval` lives in exactly one place — a React hook (`src/hooks/useMatchTicker.ts`) that calls the store's `tick()` action on an interval. The engine, economy, and store stay fully timer-free and synchronously testable; the hook takes `intervalMs` as a parameter so future sports can supply their own pacing.
+- The Zustand store (`src/store/useGameStore.ts`) instantiates one module-scoped sport module (currently `createSoccerModule()`) and exposes a single `tick()` action; on match completion it resets match state in the same `set()` call, which is what makes the loop self-perpetuating (no separate "start next match" action needed).
+
 ## Build Order (current status — update the checkboxes as work completes)
 - [x] 1. Scaffold React/Vite + Zustand, basic layout, empty store
-- [ ] 2. Single-sport match-sim tick loop, one currency, minimal UI
+- [x] 2. Single-sport match-sim tick loop, one currency, minimal UI
 - [ ] 3. Second sport as a plugged-in module (validates engine abstraction)
 - [ ] 4. Player development, scouting, contracts
 - [ ] 5. Facilities/upgrades system
