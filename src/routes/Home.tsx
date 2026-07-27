@@ -1,10 +1,11 @@
 import { useGameStore } from '../store/useGameStore'
 import { useMatchTicker } from '../hooks/useMatchTicker'
-import MatchPanel from '../components/MatchPanel'
-import MatchControls from '../components/MatchControls'
+import { SOCCER_VENTURE_TIERS } from '../sports/soccer/soccerModule'
+import VentureCard from '../components/VentureCard'
 
 function Home() {
   const isInitialized = useGameStore((state) => state.isInitialized)
+  const revenue = useGameStore((state) => state.currencies.revenue)
   useMatchTicker()
 
   return (
@@ -14,8 +15,12 @@ function Home() {
       <p>
         Game store initialized: <strong>{String(isInitialized)}</strong>
       </p>
-      <MatchPanel />
-      <MatchControls />
+      <p>Total Revenue: {revenue}</p>
+      <div>
+        {SOCCER_VENTURE_TIERS.map((config) => (
+          <VentureCard key={config.id} tierId={config.id} />
+        ))}
+      </div>
     </section>
   )
 }

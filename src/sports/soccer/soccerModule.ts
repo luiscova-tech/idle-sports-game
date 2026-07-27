@@ -90,3 +90,74 @@ export function createSoccerModule(
     getOutcome,
   }
 }
+
+/**
+ * Soccer's venture tiers (Adventure-Capitalist-style parallel revenue
+ * generators). Each tier runs its own independent match through the exact
+ * same createSoccerModule()/tick()/getOutcome() above — the match
+ * simulation itself never diverges per tier. The only per-tier difference
+ * is a revenue multiplier applied on top of economy.ts's base win/draw/loss
+ * payout, so src/engine/economy.ts stays untouched and tier-agnostic.
+ *
+ * Tier names/numbers are sport-specific vocabulary, so they live here (the
+ * only file allowed to name soccer competition tiers) rather than in the
+ * store. A second sport (step 3) defines its own tier list the same way.
+ */
+export interface SoccerVentureTierConfig {
+  id: string
+  name: string
+  /** Multiplier applied to economy.ts's base outcome revenue at upgrade level 1. */
+  baseRevenueMultiplier: number
+  /** Cumulative revenue the immediately preceding tier must earn before this tier unlocks. Ignored for the first tier. */
+  unlockThreshold: number
+  /** One-time Revenue cost to unlock auto-play for this tier. */
+  managerHireCost: number
+  /** Cost of this tier's first "Improve Training" upgrade (level 1 -> 2). */
+  upgradeBaseCost: number
+  /** Per-level cost growth rate — a mild exponential curve. */
+  upgradeCostGrowth: number
+}
+
+export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
+  {
+    id: 'local-game',
+    name: 'Local Game',
+    baseRevenueMultiplier: 1,
+    unlockThreshold: 0,
+    managerHireCost: 150,
+    upgradeBaseCost: 100,
+    upgradeCostGrowth: 1.6,
+  },
+  {
+    id: 'local-tournament',
+    name: 'Local Tournament',
+    baseRevenueMultiplier: 4,
+    unlockThreshold: 600,
+    managerHireCost: 500,
+    upgradeBaseCost: 300,
+    upgradeCostGrowth: 1.6,
+  },
+  {
+    id: 'regional-championship',
+    name: 'Regional Championship',
+    baseRevenueMultiplier: 12,
+    unlockThreshold: 3000,
+    managerHireCost: 2500,
+    upgradeBaseCost: 1200,
+    upgradeCostGrowth: 1.65,
+  },
+  {
+    id: 'national-league',
+    name: 'National League',
+    baseRevenueMultiplier: 35,
+    unlockThreshold: 15000,
+    managerHireCost: 12000,
+    upgradeBaseCost: 5000,
+    upgradeCostGrowth: 1.7,
+  },
+]
+
+/** Revenue cost to raise a tier currently at `currentLevel` to the next level. */
+export function tierUpgradeCost(config: SoccerVentureTierConfig, currentLevel: number): number {
+  return Math.round(config.upgradeBaseCost * config.upgradeCostGrowth ** (currentLevel - 1))
+}
