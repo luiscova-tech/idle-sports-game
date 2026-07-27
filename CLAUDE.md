@@ -72,7 +72,7 @@ Closed the "click with no feedback until match end" gap identified in playtestin
 - Scoped sessions: work one build-order step at a time. Stop and summarize before starting the next step unless explicitly told to continue.
 - Prefer clarity/maintainability over premature optimization — this is a solo long-term project, not a performance-critical app.
 - Solo git workflow: commit directly to `main` for all build-order steps. Do not create feature branches or open pull requests unless explicitly asked.
-- End-of-session deliverables: every session ends with (1) a written summary of what was done, and (2) a plain-text description of the current UI state as observed via the browser preview tool (what's rendered, what changed visually) — even without a screenshot, so the user can relay it to another reviewer.
+- End-of-session deliverables: every session ends with (1) a written summary of what was done, (2) a plain-text description of the current UI state as observed via the browser preview tool (what's rendered, what changed visually) — even without a screenshot, so the user can relay it to another reviewer — and (3) a playable link (start the dev server via the browser preview tool and give the `http://localhost:5173` URL, noting it's local-only and stops when the session ends).
 
 ## Maintenance
 After any session that completes a meaningful chunk of work (a full build-order step, a significant architecture decision, or a notable deviation from the plan above), **regenerate this file**: update the checkboxes, add any new conventions or architecture decisions actually made, and note deviations from the original brief. Keep it concise — this file should always reflect current reality, not the full history of how it got there.
