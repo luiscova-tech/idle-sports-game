@@ -1,6 +1,7 @@
 import { useGameStore } from '../store/useGameStore'
 import { useMatchTicker } from '../hooks/useMatchTicker'
 import MatchPanel from '../components/MatchPanel'
+import MatchControls from '../components/MatchControls'
 
 function Home() {
   const isInitialized = useGameStore((state) => state.isInitialized)
@@ -14,6 +15,7 @@ function Home() {
         Game store initialized: <strong>{String(isInitialized)}</strong>
       </p>
       <MatchPanel />
+      <MatchControls />
     </section>
   )
 }

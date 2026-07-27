@@ -26,6 +26,14 @@ A multi-sport idle/incremental franchise management game. Browser-first (React +
 - The idle loop's `setInterval` lives in exactly one place — a React hook (`src/hooks/useMatchTicker.ts`) that calls the store's `tick()` action on an interval. The engine, economy, and store stay fully timer-free and synchronously testable; the hook takes `intervalMs` as a parameter so future sports can supply their own pacing.
 - The Zustand store (`src/store/useGameStore.ts`) instantiates one module-scoped sport module (currently `createSoccerModule()`) and exposes a single `tick()` action; on match completion it resets match state in the same `set()` call, which is what makes the loop self-perpetuating (no separate "start next match" action needed).
 
+### Manual-before-automated pattern (amendment to step 2)
+Classic idle games hook players with manual interaction before automation is earned. Applied to soccer, and intended as the template for every future sport:
+- The store's `tick()` action is the single resolution path for advancing a match by one tick — it is called identically by the idle interval and by a manual player action, so there is never a forked "manual" vs. "automatic" simulation branch.
+- A boolean `autoPlayUnlocked` (default `false`) gates the idle interval: `useMatchTicker` only starts its `setInterval` once `autoPlayUnlocked` is true. Before that, `tick()` only runs when the player manually triggers it (soccer's "Push the Attack" button in `src/components/MatchControls.tsx`).
+- `autoPlayUnlocked` is flipped by a one-time Revenue purchase (`hireManager()` in the store, cost `MANAGER_HIRE_COST`). This cost/unlock logic lives in the store, not in `src/engine/economy.ts` — it's a store/UI-level idle mechanic ("pay currency to unlock automation"), not part of the sport-agnostic match-outcome economy.
+- Chosen design: the manual action button stays visible and usable even after automation unlocks (a supplemental boost), rather than being hidden — matches the genre convention that active play keeps some value after idle progression is unlocked.
+- Future sports should follow the same shape: a manual per-tick trigger wired to the same `tick()` path, gated automation behind a purchasable unlock, no changes to `src/engine/**`.
+
 ## Build Order (current status — update the checkboxes as work completes)
 - [x] 1. Scaffold React/Vite + Zustand, basic layout, empty store
 - [x] 2. Single-sport match-sim tick loop, one currency, minimal UI
