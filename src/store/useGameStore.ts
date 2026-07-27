@@ -26,9 +26,10 @@ export interface VentureTier {
   tickIndex: number
   match: SoccerMatchState
   matchesCompleted: number
-  /** Lifetime Revenue earned FROM this tier specifically — tracked only to
-   *  gate the next tier's unlock, not a separate currency (Revenue itself
-   *  stays one global pool in `currencies`). */
+  /** Lifetime Revenue earned FROM this tier specifically — an informational
+   *  stat only. Unlocking the next tier is a deliberate purchase from the
+   *  player's current spendable balance (see unlockTier), not gated on
+   *  this; Revenue itself stays one global pool in `currencies`. */
   cumulativeRevenue: number
   lastOutcome: MatchOutcome | null
 }
@@ -47,21 +48,6 @@ function createInitialTiers(): VentureTier[] {
   }))
 }
 
-// Re-checks every locked tier's unlock threshold against its immediately
-// preceding tier's cumulative revenue. Called after every tick's tiers
-// update (not only on match completion) — direct per-tick revenue now
-// accrues into cumulativeRevenue on every tick, so a threshold can be
-// crossed mid-match and must be picked up immediately, not just at the
-// 90th tick.
-function applyTierUnlocks(tiers: VentureTier[]): VentureTier[] {
-  return tiers.map((tier, index) => {
-    if (tier.unlocked || index === 0) return tier
-    const priorTier = tiers[index - 1]
-    const threshold = SOCCER_VENTURE_TIERS[index].unlockThreshold
-    return priorTier.cumulativeRevenue >= threshold ? { ...tier, unlocked: true } : tier
-  })
-}
-
 interface GameState {
   isInitialized: boolean
   tiers: VentureTier[]
@@ -69,6 +55,7 @@ interface GameState {
   tickTier: (tierId: string) => void
   upgradeTier: (tierId: string) => void
   hireManagerForTier: (tierId: string) => void
+  unlockTier: (tierId: string) => void
 }
 
 // Wrapped in zustand's persist middleware (localStorage) per CLAUDE.md's
@@ -122,7 +109,7 @@ export const useGameStore = create<GameState>()(
                 : t,
             )
             return {
-              tiers: applyTierUnlocks(updatedTiers),
+              tiers: updatedTiers,
               currencies: { revenue: s.currencies.revenue + totalEarned },
             }
           })
@@ -139,7 +126,7 @@ export const useGameStore = create<GameState>()(
                 : t,
             )
             return {
-              tiers: applyTierUnlocks(updatedTiers),
+              tiers: updatedTiers,
               currencies: { revenue: s.currencies.revenue + perTickRevenue },
             }
           })
@@ -178,6 +165,27 @@ export const useGameStore = create<GameState>()(
         set((s) => ({
           currencies: { revenue: s.currencies.revenue - cost },
           tiers: s.tiers.map((t, i) => (i === tierIndex ? { ...t, managerHired: true } : t)),
+        }))
+      },
+
+      // Unlocks a locked tier outright, spending its configured unlockCost
+      // from the player's current Revenue balance — the same pool Improve
+      // Training/Hire a Manager draw from. A deliberate player choice, not
+      // an automatic threshold: this is what creates the invest-in-current-
+      // tier vs. save-for-the-next-tier trade-off. No-op if already
+      // unlocked or Revenue is insufficient.
+      unlockTier: (tierId) => {
+        const { tiers, currencies } = get()
+        const tierIndex = tiers.findIndex((t) => t.id === tierId)
+        if (tierIndex === -1) return
+        const tier = tiers[tierIndex]
+        if (tier.unlocked) return
+        const cost = SOCCER_VENTURE_TIERS[tierIndex].unlockCost
+        if (currencies.revenue < cost) return
+
+        set((s) => ({
+          currencies: { revenue: s.currencies.revenue - cost },
+          tiers: s.tiers.map((t, i) => (i === tierIndex ? { ...t, unlocked: true } : t)),
         }))
       },
     }),

@@ -26,23 +26,23 @@ function VentureCard({ tierId }: VentureCardProps) {
   const tierIndex = SOCCER_VENTURE_TIERS.findIndex((c) => c.id === tierId)
   const config = SOCCER_VENTURE_TIERS[tierIndex]
   const tier = useGameStore((s) => s.tiers[tierIndex])
-  const priorCumulativeRevenue = useGameStore((s) =>
-    tierIndex > 0 ? s.tiers[tierIndex - 1].cumulativeRevenue : 0,
-  )
   const revenue = useGameStore((s) => s.currencies.revenue)
   const tickTier = useGameStore((s) => s.tickTier)
   const upgradeTier = useGameStore((s) => s.upgradeTier)
   const hireManagerForTier = useGameStore((s) => s.hireManagerForTier)
+  const unlockTier = useGameStore((s) => s.unlockTier)
 
   if (!tier.unlocked) {
-    const priorTierName = SOCCER_VENTURE_TIERS[tierIndex - 1].name
     return (
       <div data-tier-id={tierId}>
         <h3>{config.name} — Locked</h3>
-        <p>
-          Unlocks when {priorTierName} earns {config.unlockThreshold} cumulative Revenue
-          (currently {priorCumulativeRevenue}).
-        </p>
+        <button
+          type="button"
+          onClick={() => unlockTier(tierId)}
+          disabled={revenue < config.unlockCost}
+        >
+          Unlock {config.name} ({Math.min(revenue, config.unlockCost)}/{config.unlockCost} Revenue)
+        </button>
       </div>
     )
   }

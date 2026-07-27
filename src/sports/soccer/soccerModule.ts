@@ -111,8 +111,11 @@ export interface SoccerVentureTierConfig {
   name: string
   /** Multiplier applied to economy.ts's base outcome revenue at upgrade level 1. */
   baseRevenueMultiplier: number
-  /** Cumulative revenue the immediately preceding tier must earn before this tier unlocks. Ignored for the first tier. */
-  unlockThreshold: number
+  /** Revenue cost to unlock this tier, paid from the player's current
+   *  spendable balance (same pool as Improve Training/Hire a Manager) —
+   *  a deliberate player choice, not an automatic threshold. Ignored for
+   *  the first tier, which starts unlocked. */
+  unlockCost: number
   /** One-time Revenue cost to unlock auto-play for this tier. */
   managerHireCost: number
   /** Cost of this tier's first "Improve Training" upgrade (level 1 -> 2). */
@@ -126,7 +129,7 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
     id: 'local-game',
     name: 'Local Game',
     baseRevenueMultiplier: 1,
-    unlockThreshold: 0,
+    unlockCost: 0,
     managerHireCost: 150,
     upgradeBaseCost: 100,
     upgradeCostGrowth: 1.6,
@@ -135,7 +138,7 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
     id: 'local-tournament',
     name: 'Local Tournament',
     baseRevenueMultiplier: 4,
-    unlockThreshold: 450,
+    unlockCost: 450,
     managerHireCost: 500,
     upgradeBaseCost: 300,
     upgradeCostGrowth: 1.6,
@@ -144,7 +147,7 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
     id: 'regional-championship',
     name: 'Regional Championship',
     baseRevenueMultiplier: 12,
-    unlockThreshold: 2250,
+    unlockCost: 2250,
     managerHireCost: 2500,
     upgradeBaseCost: 1200,
     upgradeCostGrowth: 1.65,
@@ -153,7 +156,7 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
     id: 'national-league',
     name: 'National League',
     baseRevenueMultiplier: 35,
-    unlockThreshold: 11250,
+    unlockCost: 11250,
     managerHireCost: 12000,
     upgradeBaseCost: 5000,
     upgradeCostGrowth: 1.7,
