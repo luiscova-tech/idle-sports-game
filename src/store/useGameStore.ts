@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
 import { advanceTick, isMatchComplete, finalizeMatch } from '../engine/tickEngine'
 import type { MatchOutcome } from '../engine/types'
 import {
@@ -66,89 +67,101 @@ interface GameState {
   hireManagerForTier: (tierId: string) => void
 }
 
-export const useGameStore = create<GameState>((set, get) => ({
-  isInitialized: true,
-  tiers: createInitialTiers(),
-  currencies: { revenue: 0 },
+// Wrapped in zustand's persist middleware (localStorage) per CLAUDE.md's
+// "client-side persistence for v1" — transparent to the tier/economy/engine
+// logic below, which is unaware it's being saved. partialize keeps only
+// actual game state in localStorage; actions are recreated fresh on load.
+export const useGameStore = create<GameState>()(
+  persist(
+    (set, get) => ({
+      isInitialized: true,
+      tiers: createInitialTiers(),
+      currencies: { revenue: 0 },
 
-  // Advances one tier's match by exactly one tick, via the same
-  // engine/economy path whether it's called from the idle interval
-  // (useMatchTicker) or a manual "Push the Attack" click (VentureCard) —
-  // there is no separate manual-resolution logic per tier.
-  tickTier: (tierId) => {
-    const { tiers } = get()
-    const tierIndex = tiers.findIndex((t) => t.id === tierId)
-    if (tierIndex === -1) return
-    const tier = tiers[tierIndex]
-    if (!tier.unlocked) return
+      // Advances one tier's match by exactly one tick, via the same
+      // engine/economy path whether it's called from the idle interval
+      // (useMatchTicker) or a manual "Push the Attack" click (VentureCard) —
+      // there is no separate manual-resolution logic per tier.
+      tickTier: (tierId) => {
+        const { tiers } = get()
+        const tierIndex = tiers.findIndex((t) => t.id === tierId)
+        if (tierIndex === -1) return
+        const tier = tiers[tierIndex]
+        if (!tier.unlocked) return
 
-    const { state: nextMatch } = advanceTick(soccerModule, tier.match, tier.tickIndex)
-    const nextTickIndex = tier.tickIndex + 1
+        const { state: nextMatch } = advanceTick(soccerModule, tier.match, tier.tickIndex)
+        const nextTickIndex = tier.tickIndex + 1
 
-    if (isMatchComplete(soccerModule, nextTickIndex)) {
-      const { outcome, revenue: baseRevenue } = finalizeMatch(soccerModule, nextMatch)
-      const config = SOCCER_VENTURE_TIERS[tierIndex]
-      const earnedRevenue = Math.round(baseRevenue * config.baseRevenueMultiplier * tier.level)
+        if (isMatchComplete(soccerModule, nextTickIndex)) {
+          const { outcome, revenue: baseRevenue } = finalizeMatch(soccerModule, nextMatch)
+          const config = SOCCER_VENTURE_TIERS[tierIndex]
+          const earnedRevenue = Math.round(baseRevenue * config.baseRevenueMultiplier * tier.level)
 
-      set((s) => {
-        const updatedTiers = s.tiers.map((t, i) =>
-          i === tierIndex
-            ? {
-                ...t,
-                match: soccerModule.createInitialState(),
-                tickIndex: 0,
-                matchesCompleted: t.matchesCompleted + 1,
-                cumulativeRevenue: t.cumulativeRevenue + earnedRevenue,
-                lastOutcome: outcome,
-              }
-            : t,
-        )
-        return {
-          tiers: applyTierUnlocks(updatedTiers),
-          currencies: { revenue: s.currencies.revenue + earnedRevenue },
+          set((s) => {
+            const updatedTiers = s.tiers.map((t, i) =>
+              i === tierIndex
+                ? {
+                    ...t,
+                    match: soccerModule.createInitialState(),
+                    tickIndex: 0,
+                    matchesCompleted: t.matchesCompleted + 1,
+                    cumulativeRevenue: t.cumulativeRevenue + earnedRevenue,
+                    lastOutcome: outcome,
+                  }
+                : t,
+            )
+            return {
+              tiers: applyTierUnlocks(updatedTiers),
+              currencies: { revenue: s.currencies.revenue + earnedRevenue },
+            }
+          })
+        } else {
+          set((s) => ({
+            tiers: s.tiers.map((t, i) =>
+              i === tierIndex ? { ...t, match: nextMatch, tickIndex: nextTickIndex } : t,
+            ),
+          }))
         }
-      })
-    } else {
-      set((s) => ({
-        tiers: s.tiers.map((t, i) =>
-          i === tierIndex ? { ...t, match: nextMatch, tickIndex: nextTickIndex } : t,
-        ),
-      }))
-    }
-  },
+      },
 
-  // "Improve Training": spends Revenue to raise a tier's output multiplier
-  // by one level. Cost grows per level (see tierUpgradeCost).
-  upgradeTier: (tierId) => {
-    const { tiers, currencies } = get()
-    const tierIndex = tiers.findIndex((t) => t.id === tierId)
-    if (tierIndex === -1) return
-    const tier = tiers[tierIndex]
-    if (!tier.unlocked) return
-    const cost = tierUpgradeCost(SOCCER_VENTURE_TIERS[tierIndex], tier.level)
-    if (currencies.revenue < cost) return
+      // "Improve Training": spends Revenue to raise a tier's output multiplier
+      // by one level. Cost grows per level (see tierUpgradeCost).
+      upgradeTier: (tierId) => {
+        const { tiers, currencies } = get()
+        const tierIndex = tiers.findIndex((t) => t.id === tierId)
+        if (tierIndex === -1) return
+        const tier = tiers[tierIndex]
+        if (!tier.unlocked) return
+        const cost = tierUpgradeCost(SOCCER_VENTURE_TIERS[tierIndex], tier.level)
+        if (currencies.revenue < cost) return
 
-    set((s) => ({
-      currencies: { revenue: s.currencies.revenue - cost },
-      tiers: s.tiers.map((t, i) => (i === tierIndex ? { ...t, level: t.level + 1 } : t)),
-    }))
-  },
+        set((s) => ({
+          currencies: { revenue: s.currencies.revenue - cost },
+          tiers: s.tiers.map((t, i) => (i === tierIndex ? { ...t, level: t.level + 1 } : t)),
+        }))
+      },
 
-  // One-time purchase per tier: once hired, useMatchTicker starts
-  // auto-ticking this tier specifically. No-op if already hired or
-  // Revenue is insufficient.
-  hireManagerForTier: (tierId) => {
-    const { tiers, currencies } = get()
-    const tierIndex = tiers.findIndex((t) => t.id === tierId)
-    if (tierIndex === -1) return
-    const tier = tiers[tierIndex]
-    if (!tier.unlocked || tier.managerHired) return
-    const cost = SOCCER_VENTURE_TIERS[tierIndex].managerHireCost
-    if (currencies.revenue < cost) return
+      // One-time purchase per tier: once hired, useMatchTicker starts
+      // auto-ticking this tier specifically. No-op if already hired or
+      // Revenue is insufficient.
+      hireManagerForTier: (tierId) => {
+        const { tiers, currencies } = get()
+        const tierIndex = tiers.findIndex((t) => t.id === tierId)
+        if (tierIndex === -1) return
+        const tier = tiers[tierIndex]
+        if (!tier.unlocked || tier.managerHired) return
+        const cost = SOCCER_VENTURE_TIERS[tierIndex].managerHireCost
+        if (currencies.revenue < cost) return
 
-    set((s) => ({
-      currencies: { revenue: s.currencies.revenue - cost },
-      tiers: s.tiers.map((t, i) => (i === tierIndex ? { ...t, managerHired: true } : t)),
-    }))
-  },
-}))
+        set((s) => ({
+          currencies: { revenue: s.currencies.revenue - cost },
+          tiers: s.tiers.map((t, i) => (i === tierIndex ? { ...t, managerHired: true } : t)),
+        }))
+      },
+    }),
+    {
+      name: 'idle-sports-game-save',
+      partialize: (state) => ({ tiers: state.tiers, currencies: state.currencies }),
+    },
+  ),
+)

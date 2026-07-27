@@ -73,7 +73,10 @@ function tick(
   }
 }
 
-function getOutcome(state: SoccerMatchState): MatchOutcome {
+/** Exported so UI can derive a live "if the match ended now" projected
+ *  outcome from mid-match state, reusing the exact same logic the engine
+ *  uses at actual match completion — never duplicated in a component. */
+export function getOutcome(state: SoccerMatchState): MatchOutcome {
   if (state.homeScore > state.awayScore) return 'win'
   if (state.homeScore === state.awayScore) return 'draw'
   return 'loss'

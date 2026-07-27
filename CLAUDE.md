@@ -43,6 +43,12 @@ The single global match view was replaced with a vertical stack of independent "
 - Revenue stays ONE global currency (`currencies.revenue`), spent/earned by every tier — `cumulativeRevenue` is a per-tier tracked stat used only to gate unlocks, not a second currency. This preserves the currency-separation principle above.
 - UI: `src/components/VentureCard.tsx` (one per tier, mapped from the static `SOCCER_VENTURE_TIERS` config in `src/routes/Home.tsx`) replaced the old single `MatchPanel`/`MatchControls`, which were deleted. No styling pass yet (that's step 9) — just structure/interactivity.
 
+### Payout visibility fix (third amendment to step 2)
+Closed the "click with no feedback until match end" gap identified in playtesting: `VentureCard.tsx` now derives a live match-progress percentage (a native `<progress>` element) from `elapsedTicks / DEFAULT_SOCCER_CONFIG.ticksPerMatch`, and a live "if the match ended now" projected-payout line. The projection reuses `getOutcome()` (now exported from `soccerModule.ts`) and `calculateMatchRevenue()` (`src/engine/economy.ts`) — the exact same functions the store calls at real match completion — so the preview can never drift out of sync with the actual payout. Purely presentational: no store/economy/engine logic changed; Revenue is still only credited when a match genuinely completes.
+
+### Persistence (transparent addition to step 2)
+`src/store/useGameStore.ts` is now wrapped in zustand's `persist` middleware (localStorage, key `idle-sports-game-save`), per the "client-side persistence for v1" tech-stack line. `partialize` persists only `{ tiers, currencies }` — actions are always recreated fresh, never serialized. This is transparent to every tier/economy/engine call site above; none of that code changed.
+
 ## Build Order (current status — update the checkboxes as work completes)
 - [x] 1. Scaffold React/Vite + Zustand, basic layout, empty store
 - [x] 2. Single-sport match-sim tick loop, one currency, minimal UI

@@ -1,5 +1,11 @@
 import { useGameStore } from '../store/useGameStore'
-import { SOCCER_VENTURE_TIERS, tierUpgradeCost } from '../sports/soccer/soccerModule'
+import {
+  SOCCER_VENTURE_TIERS,
+  DEFAULT_SOCCER_CONFIG,
+  tierUpgradeCost,
+  getOutcome,
+} from '../sports/soccer/soccerModule'
+import { calculateMatchRevenue } from '../engine/economy'
 
 const OUTCOME_LABEL: Record<'win' | 'draw' | 'loss', string> = {
   win: 'WIN',
@@ -42,11 +48,29 @@ function VentureCard({ tierId }: VentureCardProps) {
 
   const upgradeCost = tierUpgradeCost(config, tier.level)
 
+  // Purely presentational: derived from state already in the store, using
+  // the exact same getOutcome()/calculateMatchRevenue() the engine uses at
+  // real match completion — never a separate formula that could drift.
+  // No store/economy logic changes; the actual payout still only lands
+  // when the match genuinely completes.
+  const progressPercent = Math.round(
+    (tier.match.elapsedTicks / DEFAULT_SOCCER_CONFIG.ticksPerMatch) * 100,
+  )
+  const projectedOutcome = getOutcome(tier.match)
+  const projectedPayout = Math.round(
+    calculateMatchRevenue(projectedOutcome) * config.baseRevenueMultiplier * tier.level,
+  )
+
   return (
     <div data-tier-id={tierId}>
       <h3>{config.name}</h3>
       <p>
         {tier.match.homeScore} - {tier.match.awayScore} (Match clock: {tier.match.elapsedTicks}')
+      </p>
+      <progress value={tier.match.elapsedTicks} max={DEFAULT_SOCCER_CONFIG.ticksPerMatch} />
+      <p>Match progress: {progressPercent}%</p>
+      <p>
+        If the match ended now ({OUTCOME_LABEL[projectedOutcome]}): {projectedPayout} Revenue
       </p>
       <p>Level: {tier.level}</p>
       <p>Matches completed: {tier.matchesCompleted}</p>
