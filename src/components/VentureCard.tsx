@@ -7,6 +7,7 @@ import {
   getOutcome,
 } from '../sports/soccer/soccerModule'
 import { calculateMatchRevenue } from '../engine/economy'
+import './VentureCard.css'
 
 const OUTCOME_LABEL: Record<'win' | 'draw' | 'loss', string> = {
   win: 'WIN',
@@ -21,7 +22,8 @@ interface VentureCardProps {
 // One card per venture tier. Locked tiers show what's needed to unlock;
 // unlocked tiers show their own independent match/level/manager state and
 // controls — no cross-tier logic here, each card only reads/acts on its
-// own tierId.
+// own tierId. Markup/CSS only below reflects card state (unlocked vs.
+// locked-affordable vs. locked-far) — no store/logic changes.
 function VentureCard({ tierId }: VentureCardProps) {
   const tierIndex = SOCCER_VENTURE_TIERS.findIndex((c) => c.id === tierId)
   const config = SOCCER_VENTURE_TIERS[tierIndex]
@@ -33,13 +35,33 @@ function VentureCard({ tierId }: VentureCardProps) {
   const unlockTier = useGameStore((s) => s.unlockTier)
 
   if (!tier.unlocked) {
+    const unlockAffordable = revenue >= config.unlockCost
+    const unlockProgressPercent = Math.min(100, Math.round((revenue / config.unlockCost) * 100))
+
     return (
-      <div data-tier-id={tierId}>
-        <h3>{config.name} — Locked</h3>
+      <div
+        className={`venture-card venture-card--locked ${
+          unlockAffordable ? 'venture-card--locked-affordable' : 'venture-card--locked-far'
+        }`}
+        data-tier-id={tierId}
+      >
+        <div className="venture-card__header">
+          <h3 className="venture-card__title">{config.name}</h3>
+          <span className="venture-card__lock-icon" aria-hidden="true">
+            🔒
+          </span>
+        </div>
+        <div className="venture-card__locked-progress-track">
+          <div
+            className="venture-card__locked-progress-fill"
+            style={{ width: `${unlockProgressPercent}%` }}
+          />
+        </div>
         <button
           type="button"
+          className="btn btn--unlock"
           onClick={() => unlockTier(tierId)}
-          disabled={revenue < config.unlockCost}
+          disabled={!unlockAffordable}
         >
           Unlock {config.name} ({Math.min(revenue, config.unlockCost)}/{config.unlockCost} Revenue)
         </button>
@@ -64,45 +86,74 @@ function VentureCard({ tierId }: VentureCardProps) {
   )
 
   return (
-    <div data-tier-id={tierId}>
-      <h3>{config.name}</h3>
-      <p>
-        {tier.match.homeScore} - {tier.match.awayScore} (Match clock: {tier.match.elapsedTicks}')
+    <div className="venture-card venture-card--unlocked" data-tier-id={tierId}>
+      <div className="venture-card__header">
+        <h3 className="venture-card__title">{config.name}</h3>
+        {tier.managerHired && <span className="venture-card__badge">AUTO</span>}
+      </div>
+
+      <div className="venture-card__score">
+        {tier.match.homeScore} - {tier.match.awayScore}
+        <span className="venture-card__clock">{tier.match.elapsedTicks}'</span>
+      </div>
+
+      <div className="venture-card__progress-track">
+        <div className="venture-card__progress-fill" style={{ width: `${progressPercent}%` }} />
+      </div>
+      <p className="venture-card__projection">
+        If the match ended now: <strong>{OUTCOME_LABEL[projectedOutcome]}</strong>, +
+        {projectedPayout} Revenue
       </p>
-      <progress value={tier.match.elapsedTicks} max={DEFAULT_SOCCER_CONFIG.ticksPerMatch} />
-      <p>Match progress: {progressPercent}%</p>
-      <p>
-        If the match ended now ({OUTCOME_LABEL[projectedOutcome]}): {projectedPayout} Revenue
-      </p>
-      <p>Level: {tier.level}</p>
-      <p>Matches completed: {tier.matchesCompleted}</p>
-      <p>Cumulative Revenue: {tier.cumulativeRevenue}</p>
-      {tier.lastOutcome && <p>Last result: {OUTCOME_LABEL[tier.lastOutcome]}</p>}
 
-      <button type="button" onClick={() => tickTier(tierId)}>
-        Push the Attack
-      </button>
-      <p>+{perTickRevenue} Revenue per push</p>
+      <div className="venture-card__stats">
+        <div className="venture-card__stat">
+          <span className="venture-card__stat-label">Level</span>
+          <span className="venture-card__stat-value">{tier.level}</span>
+        </div>
+        <div className="venture-card__stat">
+          <span className="venture-card__stat-label">Matches</span>
+          <span className="venture-card__stat-value">{tier.matchesCompleted}</span>
+        </div>
+        <div className="venture-card__stat">
+          <span className="venture-card__stat-label">Lifetime</span>
+          <span className="venture-card__stat-value">{tier.cumulativeRevenue}</span>
+        </div>
+      </div>
 
-      <button
-        type="button"
-        onClick={() => upgradeTier(tierId)}
-        disabled={revenue < upgradeCost}
-      >
-        Improve Training ({Math.min(revenue, upgradeCost)}/{upgradeCost} Revenue)
-      </button>
+      {tier.lastOutcome && (
+        <span className={`venture-card__last-result venture-card__last-result--${tier.lastOutcome}`}>
+          Last result: {OUTCOME_LABEL[tier.lastOutcome]}
+        </span>
+      )}
 
-      {tier.managerHired ? (
-        <p>Manager hired — auto-advancing.</p>
-      ) : (
+      <div className="venture-card__actions">
+        <button type="button" className="btn btn--primary" onClick={() => tickTier(tierId)}>
+          Push the Attack
+        </button>
+        <p className="venture-card__per-push">+{perTickRevenue} Revenue per push</p>
+
         <button
           type="button"
-          onClick={() => hireManagerForTier(tierId)}
-          disabled={revenue < config.managerHireCost}
+          className="btn btn--purchase"
+          onClick={() => upgradeTier(tierId)}
+          disabled={revenue < upgradeCost}
         >
-          Hire a Manager ({Math.min(revenue, config.managerHireCost)}/{config.managerHireCost} Revenue)
+          Improve Training ({Math.min(revenue, upgradeCost)}/{upgradeCost} Revenue)
         </button>
-      )}
+
+        {tier.managerHired ? (
+          <p className="venture-card__auto-note">Manager hired — auto-advancing.</p>
+        ) : (
+          <button
+            type="button"
+            className="btn btn--purchase"
+            onClick={() => hireManagerForTier(tierId)}
+            disabled={revenue < config.managerHireCost}
+          >
+            Hire a Manager ({Math.min(revenue, config.managerHireCost)}/{config.managerHireCost} Revenue)
+          </button>
+        )}
+      </div>
     </div>
   )
 }

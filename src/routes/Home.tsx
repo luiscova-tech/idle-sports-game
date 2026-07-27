@@ -9,19 +9,24 @@ function Home() {
   useMatchTicker()
 
   return (
-    <section style={{ margin: 'auto', textAlign: 'center' }}>
-      <h1>Idle Sports Franchise Builder</h1>
-      <p>Engine Online</p>
-      <p>
-        Game store initialized: <strong>{String(isInitialized)}</strong>
-      </p>
-      <p>Total Revenue: {revenue}</p>
-      <div>
+    <div className="app-shell">
+      <header className="app-header">
+        <h1 className="app-header__title">Idle Sports Franchise Builder</h1>
+        <p className="app-header__status">
+          Engine Online · Game store initialized: {String(isInitialized)}
+        </p>
+        <div className="app-header__revenue">
+          <span className="app-header__revenue-label">Total Revenue</span>
+          <span className="app-header__revenue-value">{revenue}</span>
+        </div>
+      </header>
+
+      <div className="venture-list">
         {SOCCER_VENTURE_TIERS.map((config) => (
           <VentureCard key={config.id} tierId={config.id} />
         ))}
       </div>
-    </section>
+    </div>
   )
 }
 
