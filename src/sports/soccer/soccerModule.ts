@@ -179,7 +179,90 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
     upgradeBaseCost: 88200,
     upgradeCostGrowth: 1.8,
   },
+  // Tiers 7-11, added once "Reset for Legacy" existed (see CLAUDE.md
+  // "Prestige system" / "Post-prestige ladder"). Mechanical continuation of
+  // the exact tier 1-6 curve — same 5x unlock/manager-cost growth, same
+  // ~4.2x upgrade-base-cost growth, same +0.05-per-tier upgradeCostGrowth,
+  // same gently-decreasing baseRevenueMultiplier ratio (2.8 -> 2.75 -> 2.70
+  // -> 2.65 -> 2.60 -> 2.55) — no new balance philosophy introduced. These
+  // stay invisible in the UI (see TIERS_REVEALED_BEFORE_PRESTIGE below)
+  // until a player's first prestige, per that mechanic's design.
+  {
+    id: 'legends-circuit',
+    name: "Legends' Circuit",
+    baseRevenueMultiplier: 770,
+    unlockCost: 1406250,
+    managerHireCost: 1500000,
+    upgradeBaseCost: 370440,
+    upgradeCostGrowth: 1.85,
+  },
+  {
+    id: 'galactic-league',
+    name: 'Galactic League',
+    baseRevenueMultiplier: 2079,
+    unlockCost: 7031250,
+    managerHireCost: 7500000,
+    upgradeBaseCost: 1555848,
+    upgradeCostGrowth: 1.9,
+  },
+  {
+    id: 'mythic-ascension',
+    name: 'Mythic Ascension',
+    baseRevenueMultiplier: 5509,
+    unlockCost: 35156250,
+    managerHireCost: 37500000,
+    upgradeBaseCost: 6534562,
+    upgradeCostGrowth: 1.95,
+  },
+  {
+    id: 'eternal-championship',
+    name: 'Eternal Championship',
+    baseRevenueMultiplier: 14323,
+    unlockCost: 175781250,
+    managerHireCost: 187500000,
+    upgradeBaseCost: 27445160,
+    upgradeCostGrowth: 2.0,
+  },
+  {
+    id: 'multiverse-cup',
+    name: 'The Multiverse Cup',
+    baseRevenueMultiplier: 36524,
+    unlockCost: 878906250,
+    managerHireCost: 937500000,
+    upgradeBaseCost: 115269672,
+    upgradeCostGrowth: 2.05,
+  },
 ]
+
+/** The tier whose unlock gates the FIRST "Reset for Legacy" — i.e. the
+ *  original ladder's final tier. Looked up by id, deliberately NOT by
+ *  `tiers[tiers.length - 1]`: once tiers 7-11 exist in this array, "the
+ *  last tier" is The Multiverse Cup, which a player can only reach AFTER
+ *  already prestiging once — checking by array-position would make a first
+ *  prestige permanently impossible. This id-based constant is the fix, and
+ *  stays correct no matter how many more tiers get appended later. */
+export const FIRST_PRESTIGE_TRIGGER_TIER_ID = 'world-championship'
+
+/** How many tiers (from the front of SOCCER_VENTURE_TIERS) are visible
+ *  before a player's first prestige. Tiers beyond this index don't
+ *  exist/render/get referenced in the UI at all until `legacy.hasPrestiged`
+ *  is true — see Home.tsx and `isTierRevealed` below. Derived from
+ *  FIRST_PRESTIGE_TRIGGER_TIER_ID rather than a second hand-maintained
+ *  number, so the reveal boundary and the prestige-trigger tier can never
+ *  silently drift apart. */
+export const TIERS_REVEALED_BEFORE_PRESTIGE =
+  SOCCER_VENTURE_TIERS.findIndex((c) => c.id === FIRST_PRESTIGE_TRIGGER_TIER_ID) + 1
+
+/** Whether the tier at `tierIndex` is allowed to exist/be interacted with
+ *  right now. This is the single authoritative check for the reveal
+ *  boundary — every store action that touches a tier (tick/upgrade/hire
+ *  manager/unlock) calls this, not just Home.tsx's render slice, so tiers
+ *  7-11 can't be made to earn real Revenue (e.g. via a hand-edited
+ *  localStorage save flipping `unlocked` directly) before a player has
+ *  actually prestiged once. */
+export function isTierRevealed(tierIndex: number, hasPrestiged: boolean): boolean {
+  return tierIndex < TIERS_REVEALED_BEFORE_PRESTIGE || hasPrestiged
+}
 
 /** Revenue cost to raise a tier currently at `currentLevel` to the next level. */
 export function tierUpgradeCost(config: SoccerVentureTierConfig, currentLevel: number): number {

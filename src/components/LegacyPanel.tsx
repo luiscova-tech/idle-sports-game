@@ -1,6 +1,10 @@
 import { useGameStore } from '../store/useGameStore'
 import { calculateLegacyPoints, PERMANENT_UPGRADES } from '../engine/prestige'
+import { SOCCER_VENTURE_TIERS, FIRST_PRESTIGE_TRIGGER_TIER_ID } from '../sports/soccer/soccerModule'
 import './LegacyPanel.css'
+
+const TRIGGER_TIER_NAME =
+  SOCCER_VENTURE_TIERS.find((c) => c.id === FIRST_PRESTIGE_TRIGGER_TIER_ID)?.name ?? 'the final tier'
 
 // Distinct visual system from VentureCard on purpose (see index.css's
 // --color-legacy* tokens) — Legacy Points are a different currency type
@@ -11,8 +15,11 @@ function LegacyPanel() {
   const resetForLegacy = useGameStore((s) => s.resetForLegacy)
   const purchaseLegacyUpgrade = useGameStore((s) => s.purchaseLegacyUpgrade)
 
-  const finalTier = tiers[tiers.length - 1]
-  const finalTierUnlocked = finalTier?.unlocked ?? false
+  // Looked up by id, not `tiers[tiers.length - 1]` — the first prestige is
+  // always gated on World Championship specifically, even once tiers 7-11
+  // (only reachable AFTER a first prestige) exist further down the array.
+  const triggerTierUnlocked =
+    tiers.find((t) => t.id === FIRST_PRESTIGE_TRIGGER_TIER_ID)?.unlocked ?? false
   const totalEarnings = tiers.reduce((sum, t) => sum + t.cumulativeRevenue, 0)
   const previewGain = calculateLegacyPoints(totalEarnings)
 
@@ -37,11 +44,10 @@ function LegacyPanel() {
         </div>
       </div>
 
-      {!finalTierUnlocked ? (
+      {!triggerTierUnlocked ? (
         <p className="legacy-panel__locked-note">
-          Reach and unlock {finalTier?.id === 'world-championship' ? 'World Championship' : 'the final tier'} to
-          unlock Reset for Legacy — a permanent prestige system that trades this run's progress for Legacy
-          Points and lasting upgrades.
+          Reach and unlock {TRIGGER_TIER_NAME} to unlock Reset for Legacy — a permanent prestige system
+          that trades this run's progress for Legacy Points and lasting upgrades.
         </p>
       ) : (
         <div className="legacy-panel__reset-block">

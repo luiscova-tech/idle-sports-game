@@ -18,6 +18,8 @@ import {
   SOCCER_VENTURE_TIERS,
   tierUpgradeCost,
   tierPerTickRevenue,
+  FIRST_PRESTIGE_TRIGGER_TIER_ID,
+  isTierRevealed,
 } from '../sports/soccer/soccerModule'
 
 // Single module-scoped instance of the currently plugged-in sport. Every
@@ -67,9 +69,12 @@ export interface LegacyState {
   /** Permanent, never reset by resetForLegacy(). Spendable currency earned
    *  by prestiging — its own currency type, cleanly separated from Revenue. */
   legacyPoints: number
-  /** True forever once the player has prestiged at least once. Future
-   *  build-order steps use this to gate tiers 7-11 (not built this
-   *  session). */
+  /** True forever once the player has prestiged at least once. Gates
+   *  whether tiers 7-11 (`legends-circuit` onward) exist/render in the UI
+   *  at all — see `TIERS_REVEALED_BEFORE_PRESTIGE` in `soccerModule.ts` and
+   *  `Home.tsx`. Once true it never reverts on a `resetForLegacy()` reset
+   *  (that's the whole point — the reveal is permanent), only on a full
+   *  `resetProgress()` wipe. */
   hasPrestiged: boolean
   prestigeCount: number
   permanentUpgrades: PermanentUpgradeLevels
@@ -120,6 +125,11 @@ export const useGameStore = create<GameState>()(
         if (tierIndex === -1) return
         const tier = tiers[tierIndex]
         if (!tier.unlocked) return
+        // Defense in depth: tiers 7-11 must never earn real Revenue before
+        // a player's first prestige, even if `unlocked`/`managerHired` were
+        // somehow set directly (e.g. a hand-edited localStorage save) —
+        // this is the actual choke point, not just Home.tsx's render slice.
+        if (!isTierRevealed(tierIndex, legacy.hasPrestiged)) return
 
         const { state: nextMatch } = advanceTick(soccerModule, tier.match, tier.tickIndex)
         const nextTickIndex = tier.tickIndex + 1
@@ -182,11 +192,12 @@ export const useGameStore = create<GameState>()(
       // "Improve Training": spends Revenue to raise a tier's output multiplier
       // by one level. Cost grows per level (see tierUpgradeCost).
       upgradeTier: (tierId) => {
-        const { tiers, currencies } = get()
+        const { tiers, currencies, legacy } = get()
         const tierIndex = tiers.findIndex((t) => t.id === tierId)
         if (tierIndex === -1) return
         const tier = tiers[tierIndex]
         if (!tier.unlocked) return
+        if (!isTierRevealed(tierIndex, legacy.hasPrestiged)) return
         const cost = tierUpgradeCost(SOCCER_VENTURE_TIERS[tierIndex], tier.level)
         if (currencies.revenue < cost) return
 
@@ -200,11 +211,12 @@ export const useGameStore = create<GameState>()(
       // auto-ticking this tier specifically. No-op if already hired or
       // Revenue is insufficient.
       hireManagerForTier: (tierId) => {
-        const { tiers, currencies } = get()
+        const { tiers, currencies, legacy } = get()
         const tierIndex = tiers.findIndex((t) => t.id === tierId)
         if (tierIndex === -1) return
         const tier = tiers[tierIndex]
         if (!tier.unlocked || tier.managerHired) return
+        if (!isTierRevealed(tierIndex, legacy.hasPrestiged)) return
         const cost = SOCCER_VENTURE_TIERS[tierIndex].managerHireCost
         if (currencies.revenue < cost) return
 
@@ -226,6 +238,7 @@ export const useGameStore = create<GameState>()(
         if (tierIndex === -1) return
         const tier = tiers[tierIndex]
         if (tier.unlocked) return
+        if (!isTierRevealed(tierIndex, legacy.hasPrestiged)) return
         // Permanent "Veteran Discount" Legacy upgrade shrinks every unlock
         // cost (1 if never prestiged/purchased — no behavior change
         // pre-prestige).
@@ -260,13 +273,19 @@ export const useGameStore = create<GameState>()(
       // the UI's live preview uses (calculateLegacyPoints), then wipes run
       // progress (tiers, Revenue) back to fresh-game defaults — but adds
       // the Legacy Points to the permanent legacyPoints balance and flips
-      // hasPrestiged, neither of which this reset touches. No-op if the
-      // ladder's final tier (currently World Championship) isn't unlocked
-      // yet, matching the trigger condition the UI gates the button on.
+      // hasPrestiged, neither of which this reset touches. No-op unless
+      // FIRST_PRESTIGE_TRIGGER_TIER_ID (World Championship) is unlocked,
+      // matching the trigger condition the UI gates the button on. Looked
+      // up by id, not by `tiers[tiers.length - 1]` — the latter broke the
+      // instant tiers 7-11 were appended to the ladder, since "the last
+      // tier" became The Multiverse Cup, which is only reachable AFTER a
+      // first prestige (a first prestige would have become permanently
+      // impossible to trigger).
       resetForLegacy: () => {
         const { tiers } = get()
-        const finalTierUnlocked = tiers[tiers.length - 1]?.unlocked ?? false
-        if (!finalTierUnlocked) return
+        const triggerTierUnlocked =
+          tiers.find((t) => t.id === FIRST_PRESTIGE_TRIGGER_TIER_ID)?.unlocked ?? false
+        if (!triggerTierUnlocked) return
 
         const totalEarnings = tiers.reduce((sum, t) => sum + t.cumulativeRevenue, 0)
         const gained = calculateLegacyPoints(totalEarnings)
@@ -358,6 +377,24 @@ export const useGameStore = create<GameState>()(
         currencies: state.currencies,
         legacy: state.legacy,
       }),
+      // Save-migration fix: zustand's default merge does a shallow spread,
+      // so a persisted `tiers` array (from a save made before tiers 7-11
+      // existed) would silently REPLACE the freshly-initialized 11-entry
+      // array wholesale, leaving `tiers` shorter than SOCCER_VENTURE_TIERS
+      // for players who already have a save. If that shorter save also has
+      // hasPrestiged: true, the UI would try to render tiers whose state
+      // entry is `undefined` and crash. Pad any missing trailing entries
+      // with fresh tier state (unlocked: false, matching a never-yet-seen
+      // tier) instead of trusting the persisted length. Harmless/no-op for
+      // saves that already have a full-length `tiers` array.
+      merge: (persistedState, currentState) => {
+        const merged = { ...currentState, ...(persistedState as Partial<GameState>) }
+        if (merged.tiers.length < SOCCER_VENTURE_TIERS.length) {
+          const freshTiers = createInitialTiers(merged.legacy.permanentUpgrades)
+          merged.tiers = [...merged.tiers, ...freshTiers.slice(merged.tiers.length)]
+        }
+        return merged
+      },
     },
   ),
 )

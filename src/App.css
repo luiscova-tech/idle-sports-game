@@ -59,11 +59,15 @@
   display: block;
   margin: var(--space-3) auto 0;
   font: inherit;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   font-weight: 600;
+  font-family: ui-monospace, monospace;
+  letter-spacing: 0.02em;
   color: var(--color-text-muted);
   background: none;
-  border: 1px solid var(--color-border);
+  /* Dashed border, monospace label — deliberately reads as a debug/dev
+     tool, not a polished player-facing action like "Reset for Legacy". */
+  border: 1px dashed var(--color-border);
   border-radius: var(--radius-sm);
   padding: 4px var(--space-3);
   cursor: pointer;
