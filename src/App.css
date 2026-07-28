@@ -12,8 +12,27 @@
 }
 
 .app-header {
+  position: relative;
   text-align: center;
   margin-bottom: var(--space-6);
+}
+
+.app-header__settings-link {
+  position: absolute;
+  top: 0;
+  right: 0;
+  font-size: 1.25rem;
+  line-height: 1;
+  text-decoration: none;
+  color: var(--color-text-muted);
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.app-header__settings-link:hover {
+  color: var(--color-text);
+  background: var(--color-muted-surface);
 }
 
 .app-header__title {
@@ -83,4 +102,38 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+}
+
+/* ---------- Settings page ---------- */
+
+.settings-page__back-link {
+  display: inline-block;
+  margin-top: var(--space-2);
+  font-size: 0.85rem;
+  color: var(--color-primary);
+  text-decoration: none;
+}
+
+.settings-page__back-link:hover {
+  text-decoration: underline;
+}
+
+.settings-section {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  box-shadow: var(--shadow-card);
+}
+
+.settings-section__title {
+  font-size: 1rem;
+  font-weight: 700;
+  margin: 0 0 var(--space-2);
+}
+
+.settings-section__desc {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  margin: 0 0 var(--space-3);
 }

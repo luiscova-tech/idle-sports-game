@@ -56,6 +56,22 @@ export const STAT_LABELS: Record<string, string> = {
  * bridging the run currency into the permanent one.
  */
 export const ACHIEVEMENTS: AchievementConfig[] = [
+  // A very-low-threshold onboarding nudge, deliberately NOT tiered as
+  // 'Bronze' — Bronze/Silver/Gold stay real, deliberately-paced milestones
+  // (see the derivation above); this is a separate, much smaller welcome
+  // reward so a brand-new player has *something* to earn in their first
+  // session without cheapening what "Bronze" means. Pure config addition —
+  // no component/CSS changes needed, since `tier` is an open string and
+  // AchievementsPanel.css already has a generic fallback style for any
+  // tier name outside Bronze/Silver/Gold.
+  {
+    id: 'total-wins-first',
+    name: 'First Win',
+    statTracked: 'totalWins',
+    threshold: 1,
+    tier: 'Rookie',
+    reward: { type: 'revenue', amount: 20 },
+  },
   {
     id: 'total-wins-bronze',
     name: 'Fifty Victories',
