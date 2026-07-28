@@ -2,6 +2,7 @@ import { useGameStore } from '../store/useGameStore'
 import { useMatchTicker } from '../hooks/useMatchTicker'
 import { SOCCER_VENTURE_TIERS } from '../sports/soccer/soccerModule'
 import VentureCard from '../components/VentureCard'
+import LegacyPanel from '../components/LegacyPanel'
 
 function Home() {
   const isInitialized = useGameStore((state) => state.isInitialized)
@@ -30,6 +31,8 @@ function Home() {
           Reset Progress
         </button>
       </header>
+
+      <LegacyPanel />
 
       <div className="venture-list">
         {SOCCER_VENTURE_TIERS.map((config) => (

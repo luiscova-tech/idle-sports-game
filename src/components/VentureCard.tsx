@@ -7,6 +7,7 @@ import {
   getOutcome,
 } from '../sports/soccer/soccerModule'
 import { calculateMatchRevenue } from '../engine/economy'
+import { unlockCostMultiplier, globalRevenueMultiplier } from '../engine/prestige'
 import './VentureCard.css'
 
 const OUTCOME_LABEL: Record<'win' | 'draw' | 'loss', string> = {
@@ -29,14 +30,24 @@ function VentureCard({ tierId }: VentureCardProps) {
   const config = SOCCER_VENTURE_TIERS[tierIndex]
   const tier = useGameStore((s) => s.tiers[tierIndex])
   const revenue = useGameStore((s) => s.currencies.revenue)
+  const legacy = useGameStore((s) => s.legacy)
   const tickTier = useGameStore((s) => s.tickTier)
   const upgradeTier = useGameStore((s) => s.upgradeTier)
   const hireManagerForTier = useGameStore((s) => s.hireManagerForTier)
   const unlockTier = useGameStore((s) => s.unlockTier)
 
+  // Mirrors the exact rounding unlockTier()/tickTier() apply in the store,
+  // so a Legacy "Veteran Discount"/"Revenue Boost" purchase is reflected
+  // here the instant it's bought — never a display that could drift from
+  // what the store actually charges/grants (same principle as the
+  // match-projected-payout preview below).
+  const legacyUnlockMultiplier = unlockCostMultiplier(legacy.permanentUpgrades)
+  const legacyRevenueMultiplier = globalRevenueMultiplier(legacy.permanentUpgrades)
+
   if (!tier.unlocked) {
-    const unlockAffordable = revenue >= config.unlockCost
-    const unlockProgressPercent = Math.min(100, Math.round((revenue / config.unlockCost) * 100))
+    const unlockCost = Math.round(config.unlockCost * legacyUnlockMultiplier)
+    const unlockAffordable = revenue >= unlockCost
+    const unlockProgressPercent = Math.min(100, Math.round((revenue / unlockCost) * 100))
 
     return (
       <div
@@ -63,14 +74,14 @@ function VentureCard({ tierId }: VentureCardProps) {
           onClick={() => unlockTier(tierId)}
           disabled={!unlockAffordable}
         >
-          Unlock {config.name} ({Math.min(revenue, config.unlockCost)}/{config.unlockCost} Revenue)
+          Unlock {config.name} ({Math.min(revenue, unlockCost)}/{unlockCost} Revenue)
         </button>
       </div>
     )
   }
 
   const upgradeCost = tierUpgradeCost(config, tier.level)
-  const perTickRevenue = tierPerTickRevenue(config, tier.level)
+  const perTickRevenue = Math.round(tierPerTickRevenue(config, tier.level) * legacyRevenueMultiplier)
 
   // Purely presentational: derived from state already in the store, using
   // the exact same getOutcome()/calculateMatchRevenue() the engine uses at
@@ -82,7 +93,7 @@ function VentureCard({ tierId }: VentureCardProps) {
   )
   const projectedOutcome = getOutcome(tier.match)
   const projectedPayout = Math.round(
-    calculateMatchRevenue(projectedOutcome) * config.baseRevenueMultiplier * tier.level,
+    calculateMatchRevenue(projectedOutcome) * config.baseRevenueMultiplier * tier.level * legacyRevenueMultiplier,
   )
 
   return (

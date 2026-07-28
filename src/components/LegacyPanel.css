@@ -1,0 +1,133 @@
+.legacy-panel {
+  background: var(--color-legacy-bg);
+  border: 1px solid var(--color-legacy-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  box-shadow: var(--shadow-card);
+  margin-bottom: var(--space-4);
+}
+
+.legacy-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.legacy-panel__title {
+  font-size: 1.125rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0;
+  color: var(--color-legacy);
+}
+
+.legacy-panel__points {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
+}
+
+.legacy-panel__points-value {
+  font-size: 1.375rem;
+  font-weight: 700;
+  color: var(--color-legacy-accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.legacy-panel__points-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted);
+}
+
+.legacy-panel__locked-note {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  margin: 0 0 var(--space-3);
+}
+
+.legacy-panel__reset-block {
+  margin-bottom: var(--space-4);
+}
+
+.legacy-panel__preview {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  margin: 0 0 var(--space-2);
+}
+
+.legacy-panel__preview strong {
+  color: var(--color-legacy);
+}
+
+.btn--legacy {
+  width: 100%;
+  background: var(--color-legacy);
+  color: #fff;
+}
+
+.btn--legacy:hover:not(:disabled) {
+  background: var(--color-legacy-hover);
+}
+
+.legacy-panel__upgrades-title {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+  margin: 0 0 var(--space-2);
+}
+
+.legacy-upgrade {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--color-legacy-border);
+}
+
+.legacy-upgrade__info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.legacy-upgrade__name {
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.legacy-upgrade__desc {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.legacy-upgrade__level {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--color-legacy);
+}
+
+.legacy-upgrade__maxed {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--color-legacy);
+  white-space: nowrap;
+}
+
+.btn--legacy-purchase {
+  background: var(--color-legacy);
+  color: #fff;
+  white-space: nowrap;
+}
+
+.btn--legacy-purchase:hover:not(:disabled) {
+  background: var(--color-legacy-hover);
+}
