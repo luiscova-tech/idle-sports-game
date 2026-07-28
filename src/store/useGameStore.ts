@@ -23,8 +23,8 @@ import {
   trainingEffectMultiplier,
   opponentLevelRangeForTier,
   TRAINING_MILESTONE_LEVELS,
-  FIRST_PRESTIGE_TRIGGER_TIER_ID,
   isTierRevealed,
+  allVisibleTiersUnlocked,
 } from '../sports/soccer/soccerModule'
 
 // Single module-scoped instance of the currently plugged-in sport. Every
@@ -548,18 +548,18 @@ export const useGameStore = create<GameState>()(
       // progress (tiers, Revenue) back to fresh-game defaults — but adds
       // the Legacy Points to the permanent legacyPoints balance and flips
       // hasPrestiged, neither of which this reset touches. No-op unless
-      // FIRST_PRESTIGE_TRIGGER_TIER_ID (World Championship) is unlocked,
-      // matching the trigger condition the UI gates the button on. Looked
-      // up by id, not by `tiers[tiers.length - 1]` — the latter broke the
-      // instant tiers 7-11 were appended to the ladder, since "the last
-      // tier" became The Multiverse Cup, which is only reachable AFTER a
-      // first prestige (a first prestige would have become permanently
-      // impossible to trigger).
+      // EVERY currently-visible tier is unlocked (allVisibleTiersUnlocked,
+      // soccerModule.ts) — not just the single trigger tier this used to
+      // check, which let a player hoard Revenue on one tier and skip
+      // unlocking the ones in between (tiers can be unlocked in any order —
+      // unlockTier() only checks that ONE tier's own cost). Generalizes
+      // across every prestige stage automatically: at prestigeCount=0 this
+      // requires tiers 0-5 all unlocked; after each later prestige reveals
+      // one more hidden tier, the same check requires that one unlocked
+      // too, forever — no per-stage special-casing needed.
       resetForLegacy: () => {
-        const { tiers } = get()
-        const triggerTierUnlocked =
-          tiers.find((t) => t.id === FIRST_PRESTIGE_TRIGGER_TIER_ID)?.unlocked ?? false
-        if (!triggerTierUnlocked) return
+        const { tiers, legacy } = get()
+        if (!allVisibleTiersUnlocked(tiers, legacy.prestigeCount)) return
 
         const totalEarnings = tiers.reduce((sum, t) => sum + t.cumulativeRevenue, 0)
         const gained = calculateLegacyPoints(totalEarnings)

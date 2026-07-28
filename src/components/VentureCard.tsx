@@ -9,8 +9,9 @@ import {
   previousMilestoneLevel,
   getOutcome,
   getPerformanceFactor,
+  matchOutcomeProbabilities,
 } from '../sports/soccer/soccerModule'
-import { calculateMatchRevenue } from '../engine/economy'
+import { calculateMatchRevenue, expectedMatchRevenue } from '../engine/economy'
 import { unlockCostMultiplier, globalRevenueMultiplier } from '../engine/prestige'
 import './VentureCard.css'
 
@@ -176,6 +177,47 @@ function VentureCard({ tierId }: VentureCardProps) {
       legacyRevenueMultiplier,
   )
 
+  // IN-PROGRESS payout preview only (used below when matchStarted &&
+  // !matchComplete) — deliberately NOT derived from currentOutcome/
+  // currentPerformanceFactor above, unlike projectedPayout. Those two are
+  // reads of this match's ALREADY-RESOLVED result (see soccerModule.ts's
+  // resolveMatchOutcome, decided once at kickoff) — showing a number built
+  // from them, even with the outcome WORD hidden, would let a sharp player
+  // infer the real result from the number alone (e.g. it jumping to the
+  // flat loss payout the instant the match starts). expectedPayout instead
+  // is a genuine expected value over the three possible outcomes, computed
+  // ONLY from information already visible before resolution ever mattered:
+  // this tier's CURRENT training level (tier.level, read live — reflects a
+  // mid-match "Improve Training" purchase immediately) and this match's
+  // OWN already-drawn opponent level (tier.match.opponentLevel, the exact
+  // number already shown by the "Facing a Level N opponent" line below —
+  // reusing it here reveals nothing new). matchOutcomeProbabilities/
+  // expectedMatchRevenue are pure functions of those inputs alone — they
+  // never read resolvedOutcome/resolvedMargin/homeScore/awayScore — so by
+  // construction this number is IDENTICAL for every match with the same
+  // level/opponent, no matter what that match actually rolls. See
+  // CLAUDE.md for the verification proving this (many matches, same
+  // inputs, provably identical expected-payout output regardless of the
+  // real resolved outcome).
+  //
+  // Falls back to projectedPayout only in the one case where an opponent
+  // level was never drawn at all: a match already mid-flight under the OLD
+  // pre-probability-model schema (persisted before that model existed,
+  // gated on tickIndex===0 in tick() — see the fourteenth amendment). Such
+  // a match has no "hidden resolved outcome" to leak in the first place —
+  // its result is just whatever its live score currently is — so there's
+  // no downside to showing its real live projection instead of an
+  // expected value there's no opponent level to compute one from.
+  const expectedPayout =
+    tier.match.opponentLevel !== undefined
+      ? Math.round(
+          expectedMatchRevenue(matchOutcomeProbabilities(tier.level, tier.match.opponentLevel)) *
+            config.baseRevenueMultiplier *
+            trainingEffectMultiplier(tier.level) *
+            legacyRevenueMultiplier,
+        )
+      : projectedPayout
+
   return (
     <div className="venture-card venture-card--unlocked" data-tier-id={tierId}>
       <div className="venture-card__header">
@@ -201,16 +243,22 @@ function VentureCard({ tierId }: VentureCardProps) {
       <div className="venture-card__progress-track">
         <div className="venture-card__progress-fill" style={{ width: `${progressPercent}%` }} />
       </div>
-      {/* The payout NUMBER stays visible throughout — it has real decision
+      {/* A payout NUMBER stays visible throughout — it has real decision
           value when managing several auto-playing tiers at once — but the
           outcome WORD is withheld until matchComplete (see above). Three
-          states, all reading from the same currentOutcome/projectedPayout
-          values computed above, never a second/divergent source:
-            - not yet started: no resolved number to show yet (kickoff
-              pending) — reads as "N/A", not a possibly-misleading number
-              derived from the pre-resolution fallback outcome.
-            - in progress: number only, no outcome word.
-            - complete: unchanged from before this session — word + number. */}
+          states:
+            - not yet started: no number to show yet (kickoff pending) —
+              reads as "N/A", not a possibly-misleading number derived from
+              the pre-resolution fallback outcome.
+            - in progress: expectedPayout (see its own doc comment above) —
+              a genuine expected value that cannot correlate with the
+              already-resolved outcome, labeled "Expected" (not
+              "Projected") and prefixed with "~" so it reads honestly as an
+              estimate rather than a resolved number.
+            - complete: unchanged from before this session — the real
+              resolved word + projectedPayout (the actual payout this match
+              will pay), both from the single currentOutcome/
+              currentPerformanceFactor source, never a second/divergent one. */}
       {!matchStarted ? (
         <p className="venture-card__projection">Projected payout: N/A — kickoff pending</p>
       ) : matchComplete ? (
@@ -219,7 +267,7 @@ function VentureCard({ tierId }: VentureCardProps) {
           {projectedPayout} Revenue
         </p>
       ) : (
-        <p className="venture-card__projection">Projected payout: +{projectedPayout} Revenue</p>
+        <p className="venture-card__projection">Expected payout: ~{expectedPayout} Revenue</p>
       )}
       {tier.match.opponentLevel !== undefined && (
         <p className="venture-card__opponent-note">Facing a Level {tier.match.opponentLevel} opponent</p>

@@ -2,14 +2,11 @@ import { useGameStore } from '../store/useGameStore'
 import { calculateLegacyPoints, PERMANENT_UPGRADES, unlockCostMultiplier } from '../engine/prestige'
 import {
   SOCCER_VENTURE_TIERS,
-  FIRST_PRESTIGE_TRIGGER_TIER_ID,
   revealedTierCount,
+  allVisibleTiersUnlocked,
   MAX_POST_PRESTIGE_REVEALS,
 } from '../sports/soccer/soccerModule'
 import './LegacyPanel.css'
-
-const TRIGGER_TIER_NAME =
-  SOCCER_VENTURE_TIERS.find((c) => c.id === FIRST_PRESTIGE_TRIGGER_TIER_ID)?.name ?? 'the final tier'
 
 // Distinct visual system from VentureCard on purpose (see index.css's
 // --color-legacy* tokens) — Legacy Points are a different currency type
@@ -20,11 +17,14 @@ function LegacyPanel() {
   const resetForLegacy = useGameStore((s) => s.resetForLegacy)
   const purchaseLegacyUpgrade = useGameStore((s) => s.purchaseLegacyUpgrade)
 
-  // Looked up by id, not `tiers[tiers.length - 1]` — the first prestige is
-  // always gated on World Championship specifically, even once tiers 7-11
-  // (only reachable AFTER a first prestige) exist further down the array.
-  const triggerTierUnlocked =
-    tiers.find((t) => t.id === FIRST_PRESTIGE_TRIGGER_TIER_ID)?.unlocked ?? false
+  // Reads the exact same check the store's resetForLegacy() enforces (see
+  // allVisibleTiersUnlocked in soccerModule.ts) — this panel's locked-vs-
+  // available UI can never drift from what the store would actually accept,
+  // since both read one shared function rather than two independently-
+  // written conditions. Generalizes past the first prestige automatically:
+  // as later prestiges reveal more tiers, this requires the larger visible
+  // set unlocked too, with no per-stage special-casing here.
+  const canResetForLegacy = allVisibleTiersUnlocked(tiers, legacy.prestigeCount)
   const totalEarnings = tiers.reduce((sum, t) => sum + t.cumulativeRevenue, 0)
   const previewGain = calculateLegacyPoints(totalEarnings)
 
@@ -35,6 +35,11 @@ function LegacyPanel() {
   // single all-at-once unlock.
   const revealedCount = revealedTierCount(legacy.prestigeCount)
   const nextTierToReveal = SOCCER_VENTURE_TIERS[revealedCount]
+  // The last tier in the CURRENTLY-visible set — names the actual full
+  // requirement in the locked-explainer copy below, since that requirement
+  // now spans every visible tier (not just one fixed tier), and which tier
+  // is "last" grows as prestiges reveal more of the ladder.
+  const lastVisibleTier = SOCCER_VENTURE_TIERS[revealedCount - 1]
   // Counts what's left AFTER the reveal the NEXT prestige itself causes —
   // legacy.prestigeCount hasn't incremented yet (that happens inside
   // resetForLegacy), so this must look one prestige ahead of the current
@@ -70,12 +75,12 @@ function LegacyPanel() {
         </div>
       </div>
 
-      {!triggerTierUnlocked ? (
+      {!canResetForLegacy ? (
         <p className="legacy-panel__locked-note">
-          Reach and unlock {TRIGGER_TIER_NAME} to unlock Reset for Legacy — a permanent prestige system
-          that trades this run's progress for Legacy Points and lasting upgrades. Your first prestige
-          also reveals a hidden next tier beyond the ladder shown here — and each prestige after that
-          reveals one more, one at a time.
+          Unlock every tier through {lastVisibleTier.name} to unlock Reset for Legacy — a permanent
+          prestige system that trades this run's progress for Legacy Points and lasting upgrades. Your
+          first prestige also reveals a hidden next tier beyond the ladder shown here — and each
+          prestige after that reveals one more, one at a time.
         </p>
       ) : (
         <div className="legacy-panel__reset-block">

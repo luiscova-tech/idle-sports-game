@@ -90,17 +90,42 @@ const GAP_PROBABILITY_SCALE = 4
  * no clamping needed, safe by construction. */
 const DRAW_WEIGHT = 0.5
 
-/** Draws this match's opponent level from `range` and resolves the outcome
- *  via the gap-driven probability model above, in one shot. Called exactly
- *  once per match (at its first tick — see `tick()`), never re-rolled. */
-function resolveMatchOutcome(playerLevel: number, opponentLevel: number): MatchOutcome {
+/**
+ * The pure win/draw/loss probability triple for a given player/opponent
+ * level gap — exactly the formula resolveMatchOutcome below rolls a real
+ * match's outcome against, factored out into its own function so a caller
+ * that needs the PROBABILITIES themselves (not a random draw) reads from
+ * this exact same math rather than a second, separately-maintained copy.
+ *
+ * This exists specifically for VentureCard.tsx's in-progress expected-value
+ * payout preview (see calculateMatchRevenue/expectedMatchRevenue in
+ * economy.ts): that preview needs P(win)/P(draw)/P(loss) for the CURRENT
+ * player level and this match's ALREADY-DRAWN opponent level, without ever
+ * touching resolvedOutcome/resolvedMargin — reusing this function (rather
+ * than reimplementing the curve) is what makes it structurally impossible
+ * for that preview's math to silently drift from what actually decides a
+ * match, the exact bug class (two copies of the same formula diverging)
+ * this project has been bitten by more than once (see CLAUDE.md).
+ */
+export function matchOutcomeProbabilities(
+  playerLevel: number,
+  opponentLevel: number,
+): Record<MatchOutcome, number> {
   const gap = opponentLevel - playerLevel
   const pWin = 1 / (1 + 10 ** (gap / GAP_PROBABILITY_SCALE))
   const closeness = 4 * pWin * (1 - pWin)
   const pDraw = DRAW_WEIGHT * closeness * (1 - pWin)
+  return { win: pWin, draw: pDraw, loss: 1 - pWin - pDraw }
+}
+
+/** Draws this match's opponent level from `range` and resolves the outcome
+ *  via the gap-driven probability model above, in one shot. Called exactly
+ *  once per match (at its first tick — see `tick()`), never re-rolled. */
+function resolveMatchOutcome(playerLevel: number, opponentLevel: number): MatchOutcome {
+  const { win, draw } = matchOutcomeProbabilities(playerLevel, opponentLevel)
   const roll = Math.random()
-  if (roll < pWin) return 'win'
-  if (roll < pWin + pDraw) return 'draw'
+  if (roll < win) return 'win'
+  if (roll < win + draw) return 'draw'
   return 'loss'
 }
 
@@ -564,13 +589,22 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
   },
 ]
 
-/** The tier whose unlock gates the FIRST "Reset for Legacy" — i.e. the
- *  original ladder's final tier. Looked up by id, deliberately NOT by
+/** The original ladder's final tier — i.e. the last tier that exists before
+ *  any prestige has ever happened. Looked up by id, deliberately NOT by
  *  `tiers[tiers.length - 1]`: once tiers 7-11 exist in this array, "the
  *  last tier" is The Multiverse Cup, which a player can only reach AFTER
  *  already prestiging once — checking by array-position would make a first
  *  prestige permanently impossible. This id-based constant is the fix, and
- *  stays correct no matter how many more tiers get appended later. */
+ *  stays correct no matter how many more tiers get appended later.
+ *
+ *  Used only to derive TIERS_REVEALED_AT_START below now — it does NOT by
+ *  itself gate "Reset for Legacy" (see allVisibleTiersUnlocked above): an
+ *  earlier version of this gate checked only whether THIS specific tier was
+ *  unlocked, at every prestige stage, forever, which let a player skip
+ *  every tier in between (or every post-prestige tier after the first) as
+ *  long as this one specific tier stayed unlocked. The actual gate now
+ *  checks the WHOLE currently-visible prefix, generalizing correctly past
+ *  the first prestige without needing a second id like this one per stage. */
 export const FIRST_PRESTIGE_TRIGGER_TIER_ID = 'world-championship'
 
 /** How many tiers (from the front of SOCCER_VENTURE_TIERS) are visible from
@@ -612,6 +646,50 @@ export function revealedTierCount(prestigeCount: number): number {
  *  `unlocked` directly) before it's actually been revealed. */
 export function isTierRevealed(tierIndex: number, prestigeCount: number): boolean {
   return tierIndex < revealedTierCount(prestigeCount)
+}
+
+/**
+ * Whether EVERY currently-visible tier (see revealedTierCount above) is
+ * unlocked — the gate for "Reset for Legacy" (useGameStore.ts's
+ * resetForLegacy, mirrored in LegacyPanel.tsx's locked/available UI split).
+ * Generalizes across every prestige stage by construction, not by
+ * special-casing: at prestigeCount=0 this checks tiers 0 through
+ * TIERS_REVEALED_AT_START-1; once tiers reveal further, the same call
+ * (passed the new, larger prestigeCount) checks the larger visible set —
+ * there is no separate "first prestige" vs. "later prestige" branch to keep
+ * in sync.
+ *
+ * Supersedes an earlier gate that checked only `FIRST_PRESTIGE_TRIGGER_TIER_ID`
+ * ('world-championship') specifically, at every stage, forever — which had
+ * two gaps: (1) even at prestigeCount=0, it never checked tiers 0-4 at all,
+ * so a player who hoarded Revenue on Local Game alone (tiers can be
+ * unlocked in any order — unlockTier() only checks that ONE tier's own
+ * cost, never a "previous tier must be unlocked first" rule) could unlock
+ * World Championship directly and prestige while skipping every tier in
+ * between; (2) after a first prestige, it kept checking the same fixed
+ * 'world-championship' tier forever, never the newly-revealed tier (e.g.
+ * legends-circuit at prestigeCount=1) — so a multi-prestige player could
+ * permanently skip unlocking every post-prestige tier and still reset
+ * indefinitely. This function closes both gaps the same way: check the
+ * WHOLE currently-visible prefix, not one hardcoded tier, at every stage.
+ *
+ * Takes a plain `{ unlocked: boolean }[]` rather than importing VentureTier
+ * from the store, so this file's dependency direction stays store ->
+ * soccerModule, never the reverse — the store's VentureTier[] structurally
+ * satisfies this shape with no explicit coupling needed. Exported so the
+ * store (the actual enforcement point) and the UI (so the panel's
+ * locked-vs-available state can never drift from what the store would
+ * actually accept) both read from the exact same check — the "one
+ * authoritative source" principle this project has repeatedly had to
+ * re-learn the hard way (see CLAUDE.md's outcome-display and
+ * getPerformanceFactor incidents).
+ */
+export function allVisibleTiersUnlocked(
+  tiers: { unlocked: boolean }[],
+  prestigeCount: number,
+): boolean {
+  const visibleCount = revealedTierCount(prestigeCount)
+  return tiers.slice(0, visibleCount).every((t) => t.unlocked)
 }
 
 /** Revenue cost to raise a tier currently at `currentLevel` to the next level. */
