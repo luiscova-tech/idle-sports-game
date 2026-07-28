@@ -95,6 +95,13 @@ function VentureCard({ tierId }: VentureCardProps) {
       <div className="venture-card__score">
         {tier.match.homeScore} - {tier.match.awayScore}
         <span className="venture-card__clock">{tier.match.elapsedTicks}'</span>
+        {tier.lastOutcome && (
+          <span
+            className={`venture-card__last-result venture-card__last-result--${tier.lastOutcome}`}
+          >
+            {OUTCOME_LABEL[tier.lastOutcome]}
+          </span>
+        )}
       </div>
 
       <div className="venture-card__progress-track">
@@ -119,12 +126,6 @@ function VentureCard({ tierId }: VentureCardProps) {
           <span className="venture-card__stat-value">{tier.cumulativeRevenue}</span>
         </div>
       </div>
-
-      {tier.lastOutcome && (
-        <span className={`venture-card__last-result venture-card__last-result--${tier.lastOutcome}`}>
-          Last result: {OUTCOME_LABEL[tier.lastOutcome]}
-        </span>
-      )}
 
       <div className="venture-card__actions">
         <button type="button" className="btn btn--primary" onClick={() => tickTier(tierId)}>
