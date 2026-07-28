@@ -14,11 +14,27 @@
   margin-bottom: var(--space-2);
 }
 
+.venture-card__title-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
 .venture-card__title {
   font-size: 1.125rem;
   font-weight: 700;
   letter-spacing: -0.01em;
   margin: 0;
+}
+
+/* Placeholder tier art (step 9 will swap these for real AI-generated
+   icon/sprite assets) — kept small and text-line-height-matched so it
+   reads as part of the title, not a separate illustration. */
+.venture-card__tier-icon {
+  font-size: 1.25rem;
+  line-height: 1;
+  flex-shrink: 0;
 }
 
 .venture-card__badge {

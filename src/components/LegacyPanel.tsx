@@ -26,8 +26,8 @@ function LegacyPanel() {
   const handleResetForLegacy = () => {
     const confirmed = window.confirm(
       `Reset for Legacy?\n\nThis wipes all Revenue and every tier's level/unlocks/matches back ` +
-        `to a fresh Local Game start. You will gain ${previewGain} Legacy Points, which are kept ` +
-        `permanently along with any Legacy upgrades you've bought. This cannot be undone.`,
+        `to a fresh ${SOCCER_VENTURE_TIERS[0].name} start. You will gain ${previewGain} Legacy Points, ` +
+        `which are kept permanently along with any Legacy upgrades you've bought. This cannot be undone.`,
     )
     if (confirmed) resetForLegacy()
   }

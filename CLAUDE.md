@@ -128,6 +128,28 @@ Added `Legends' Circuit`, `Galactic League`, `Mythic Ascension`, `Eternal Champi
 - **Verified:** build/lint clean. Confirmed via an isolated Node harness importing the real store module directly (bypassing browser/localStorage flakiness encountered during interactive testing): `resetForLegacy()` no-ops before World Championship is unlocked; a first prestige with 700,000 total earnings correctly grants 83 Legacy Points and reveals tiers 7-11 (freshly locked); a *second* `resetForLegacy()` correctly requires only World Championship again, not The Multiverse Cup; attempting `tickTier`/`upgradeTier`/`hireManagerForTier`/`unlockTier` on a hand-flipped hidden tier before any prestige is now fully inert (no Revenue earned, no state changed); the `merge()` migration correctly preserves an old 6-tier save's progress while padding tiers 7-11 fresh, across first-load, pre-prestige-system, and already-11-tier-save cases. Also confirmed via the DOM that tier 7-11 names never appear in rendered text before a prestige.
 - **Playtest sanity check (post-prestige climb through tiers 7-11):** simulated a continuously-engaged player (same greedy unlock>manager>upgrade policy and tick rates as the original prestige-tuning simulation) climbing the full 11-tier ladder. No Legacy upgrades: ~64 minutes of continuous engagement to reach The Multiverse Cup. With a modest first-prestige upgrade set (Revenue Boost lvl 1, Head Start Capital, Fast Track): ~65 minutes — a small, expected effect since these are calibrated as an early-game boost, not an end-game one (per the "Prestige system" section above). With a heavily-invested multi-prestige upgrade set (Revenue Boost lvl 5, Veteran Discount lvl 3): ~40 minutes, a meaningful ~37% reduction. No discontinuity or unreachable wall going from tier 6 into tier 7 — the curve extends the same relative pacing tiers 1-6 already had, just at a higher absolute scale, so a second playthrough's added depth feels like "a lot more of the same game," not a different game or a brick wall.
 
+### Tier renaming + placeholder icons (tenth amendment to step 2 — cosmetic only, no logic changes)
+Renamed all 11 tiers' display `name` (config `id`s, mechanics, and every cost/multiplier are byte-for-byte unchanged) to lean into the ladder's grounded → epic → absurd arc, and gave each a single-emoji placeholder icon standing in for real AI-generated icon/sprite art (step 9):
+
+| # | id | name | icon |
+|---|----|------|------|
+| 1 | `local-game` | The Sunday League | ⚽ |
+| 2 | `local-tournament` | The Corner Kick Cup | 🚩 |
+| 3 | `regional-championship` | The Regional Rumble | 🥉 |
+| 4 | `national-league` | The National Cup | 🏅 |
+| 5 | `continental-cup` | The Continental Clash | 🌍 |
+| 6 | `world-championship` | The World Crown | 👑 |
+| 7 | `legends-circuit` | The Legends' Gauntlet | ⚔️ |
+| 8 | `galactic-league` | The Interstellar Invitational | 🚀 |
+| 9 | `mythic-ascension` | The Mythic Ascension | 🐉 |
+| 10 | `eternal-championship` | The Eternal Crown | ♾️ |
+| 11 | `multiverse-cup` | The Multiverse Cup | 🌌 |
+
+- `SoccerVentureTierConfig` gained one field, `icon: string`. `VentureCard.tsx` renders it in a new `.venture-card__title-group` wrapper (icon + title, `VentureCard.css`) for both the locked and unlocked card layouts — the existing lock-icon/AUTO-badge on the header's far side are unaffected.
+- **Every reference to a tier's display name elsewhere is already derived, not hardcoded** (confirmed by grep) — `LegacyPanel.tsx`'s lock-message and reset-confirm text both read the live `config.name` off `SOCCER_VENTURE_TIERS`, so both updated automatically. The one hardcoded exception found and fixed: `PERMANENT_UPGRADES.fastTrack.description` in `src/engine/prestige.ts` had "Local Tournament" typed as a literal string; updated to "The Corner Kick Cup" to match.
+- **These icons are explicitly a placeholder**, not the final v1 asset — step 9 ("UI polish + integrate final art assets") is where they get replaced with real AI-generated, style-locked 2D icon/sprite art per the Tech Stack line above. Anyone doing that work should remove `.venture-card__tier-icon`'s emoji rendering path in favor of an `<img>`/sprite reference at that point, not layer real art on top of the emoji.
+- Verified: build/lint clean; screenshot-checked in the browser preview that all 6 visible (pre-prestige) cards render their new name + icon correctly and the Legacy panel's dynamically-derived "Reach and unlock The World Crown" text updated with zero code changes to that string itself.
+
 ## Build Order (current status — update the checkboxes as work completes)
 - [x] 1. Scaffold React/Vite + Zustand, basic layout, empty store
 - [x] 2. Single-sport match-sim tick loop, one currency, minimal UI

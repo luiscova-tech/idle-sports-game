@@ -57,7 +57,12 @@ function VentureCard({ tierId }: VentureCardProps) {
         data-tier-id={tierId}
       >
         <div className="venture-card__header">
-          <h3 className="venture-card__title">{config.name}</h3>
+          <div className="venture-card__title-group">
+            <span className="venture-card__tier-icon" aria-hidden="true">
+              {config.icon}
+            </span>
+            <h3 className="venture-card__title">{config.name}</h3>
+          </div>
           <span className="venture-card__lock-icon" aria-hidden="true">
             🔒
           </span>
@@ -99,7 +104,12 @@ function VentureCard({ tierId }: VentureCardProps) {
   return (
     <div className="venture-card venture-card--unlocked" data-tier-id={tierId}>
       <div className="venture-card__header">
-        <h3 className="venture-card__title">{config.name}</h3>
+        <div className="venture-card__title-group">
+          <span className="venture-card__tier-icon" aria-hidden="true">
+            {config.icon}
+          </span>
+          <h3 className="venture-card__title">{config.name}</h3>
+        </div>
         {tier.managerHired && <span className="venture-card__badge">AUTO</span>}
       </div>
 

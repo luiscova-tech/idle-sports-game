@@ -109,6 +109,10 @@ export function createSoccerModule(
 export interface SoccerVentureTierConfig {
   id: string
   name: string
+  /** Placeholder tier art — a single emoji, standing in for real
+   *  AI-generated icon/sprite art (step 9). Chosen to track this ladder's
+   *  grounded -> epic -> absurd tone arc from tier 1 to tier 11. */
+  icon: string
   /** Multiplier applied to economy.ts's base outcome revenue at upgrade level 1. */
   baseRevenueMultiplier: number
   /** Revenue cost to unlock this tier, paid from the player's current
@@ -127,7 +131,8 @@ export interface SoccerVentureTierConfig {
 export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
   {
     id: 'local-game',
-    name: 'Local Game',
+    name: 'The Sunday League',
+    icon: '⚽',
     baseRevenueMultiplier: 1,
     unlockCost: 0,
     managerHireCost: 150,
@@ -136,7 +141,8 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
   },
   {
     id: 'local-tournament',
-    name: 'Local Tournament',
+    name: 'The Corner Kick Cup',
+    icon: '🚩',
     baseRevenueMultiplier: 4,
     unlockCost: 450,
     managerHireCost: 500,
@@ -145,7 +151,8 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
   },
   {
     id: 'regional-championship',
-    name: 'Regional Championship',
+    name: 'The Regional Rumble',
+    icon: '🥉',
     baseRevenueMultiplier: 12,
     unlockCost: 2250,
     managerHireCost: 2500,
@@ -154,7 +161,8 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
   },
   {
     id: 'national-league',
-    name: 'National League',
+    name: 'The National Cup',
+    icon: '🏅',
     baseRevenueMultiplier: 35,
     unlockCost: 11250,
     managerHireCost: 12000,
@@ -163,7 +171,8 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
   },
   {
     id: 'continental-cup',
-    name: 'Continental Cup',
+    name: 'The Continental Clash',
+    icon: '🌍',
     baseRevenueMultiplier: 100,
     unlockCost: 56250,
     managerHireCost: 60000,
@@ -172,7 +181,8 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
   },
   {
     id: 'world-championship',
-    name: 'World Championship',
+    name: 'The World Crown',
+    icon: '👑',
     baseRevenueMultiplier: 280,
     unlockCost: 281250,
     managerHireCost: 300000,
@@ -189,7 +199,8 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
   // until a player's first prestige, per that mechanic's design.
   {
     id: 'legends-circuit',
-    name: "Legends' Circuit",
+    name: "The Legends' Gauntlet",
+    icon: '⚔️',
     baseRevenueMultiplier: 770,
     unlockCost: 1406250,
     managerHireCost: 1500000,
@@ -198,7 +209,8 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
   },
   {
     id: 'galactic-league',
-    name: 'Galactic League',
+    name: 'The Interstellar Invitational',
+    icon: '🚀',
     baseRevenueMultiplier: 2079,
     unlockCost: 7031250,
     managerHireCost: 7500000,
@@ -207,7 +219,8 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
   },
   {
     id: 'mythic-ascension',
-    name: 'Mythic Ascension',
+    name: 'The Mythic Ascension',
+    icon: '🐉',
     baseRevenueMultiplier: 5509,
     unlockCost: 35156250,
     managerHireCost: 37500000,
@@ -216,7 +229,8 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
   },
   {
     id: 'eternal-championship',
-    name: 'Eternal Championship',
+    name: 'The Eternal Crown',
+    icon: '♾️',
     baseRevenueMultiplier: 14323,
     unlockCost: 175781250,
     managerHireCost: 187500000,
@@ -226,6 +240,7 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
   {
     id: 'multiverse-cup',
     name: 'The Multiverse Cup',
+    icon: '🌌',
     baseRevenueMultiplier: 36524,
     unlockCost: 878906250,
     managerHireCost: 937500000,

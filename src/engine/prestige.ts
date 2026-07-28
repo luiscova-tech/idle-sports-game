@@ -64,7 +64,7 @@ export const PERMANENT_UPGRADES = {
   },
   fastTrack: {
     label: 'Fast Track',
-    description: 'Local Tournament starts pre-unlocked on every future run.',
+    description: 'The Corner Kick Cup starts pre-unlocked on every future run.',
     tiersPreUnlocked: 1,
     cost: 40,
   },
