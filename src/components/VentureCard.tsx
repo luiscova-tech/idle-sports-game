@@ -139,9 +139,34 @@ function VentureCard({ tierId }: VentureCardProps) {
   // actively misleading if shown as a live result for a match that hasn't
   // had a single tick, adversarially found to flash a spurious "DRAW" badge
   // (with a real-looking flat-draw payout projection) on every single
-  // match completion and every fresh tier unlock. Gate both the live badge
-  // and the projection line on the match having actually started.
+  // match completion and every fresh tier unlock. matchStarted gates the
+  // projection line's payout number (still meaningful pre-resolution-word,
+  // see below); the actual live outcome WORD is gated separately by
+  // matchComplete (display-timing only — see next comment).
   const matchStarted = tier.match.elapsedTicks > 0
+  // Display-timing only: the OUTCOME WORD (WIN/DRAW/LOSS) is deliberately
+  // withheld until the match has actually run its full length, even though
+  // the underlying result is already decided at kickoff (resolvedOutcome,
+  // resolved on tick 0 — see soccerModule.ts). This does NOT change what's
+  // computed/stored anywhere; `currentOutcome`/`currentPerformanceFactor`
+  // below are still the single, authoritative read used everywhere a word
+  // or number is shown — matchComplete only gates whether the WORD is
+  // rendered, never a second/divergent computation of it.
+  //
+  // Note: because tickTier() (useGameStore.ts) resets a tier's match to
+  // createInitialState() in the SAME set() call that finalizes a completed
+  // match (the finishing tick's own elapsedTicks===ticksPerMatch state is
+  // only ever used transiently, to compute the outcome/payout, and is never
+  // itself written into the store), a rendered frame with
+  // elapsedTicks===ticksPerMatch essentially never occurs in live play — a
+  // match's visible elapsedTicks jumps straight from ticksPerMatch-1 to a
+  // fresh 0. matchComplete is still computed correctly here (rather than
+  // hardcoded false) so the word displays correctly if that ever changes,
+  // but in today's UI its practical effect is "the live word never shows
+  // during this match" — the just-finished result remains visible via the
+  // separate, always-on "Last Result" stat below (tier.lastOutcome),
+  // exactly as before this change.
+  const matchComplete = tier.match.elapsedTicks >= DEFAULT_SOCCER_CONFIG.ticksPerMatch
   const currentOutcome = getOutcome(tier.match)
   const currentPerformanceFactor = getPerformanceFactor(tier.match)
   const projectedPayout = Math.round(
@@ -166,7 +191,7 @@ function VentureCard({ tierId }: VentureCardProps) {
       <div className="venture-card__score">
         {tier.match.homeScore} - {tier.match.awayScore}
         <span className="venture-card__clock">{tier.match.elapsedTicks}'</span>
-        {matchStarted && (
+        {matchComplete && (
           <span className={`venture-card__outcome-badge venture-card__outcome-badge--${currentOutcome}`}>
             {OUTCOME_LABEL[currentOutcome]}
           </span>
@@ -176,11 +201,25 @@ function VentureCard({ tierId }: VentureCardProps) {
       <div className="venture-card__progress-track">
         <div className="venture-card__progress-fill" style={{ width: `${progressPercent}%` }} />
       </div>
-      {matchStarted && (
+      {/* The payout NUMBER stays visible throughout — it has real decision
+          value when managing several auto-playing tiers at once — but the
+          outcome WORD is withheld until matchComplete (see above). Three
+          states, all reading from the same currentOutcome/projectedPayout
+          values computed above, never a second/divergent source:
+            - not yet started: no resolved number to show yet (kickoff
+              pending) — reads as "N/A", not a possibly-misleading number
+              derived from the pre-resolution fallback outcome.
+            - in progress: number only, no outcome word.
+            - complete: unchanged from before this session — word + number. */}
+      {!matchStarted ? (
+        <p className="venture-card__projection">Projected payout: N/A — kickoff pending</p>
+      ) : matchComplete ? (
         <p className="venture-card__projection">
           If the match ended now: <strong>{OUTCOME_LABEL[currentOutcome]}</strong>, +
           {projectedPayout} Revenue
         </p>
+      ) : (
+        <p className="venture-card__projection">Projected payout: +{projectedPayout} Revenue</p>
       )}
       {tier.match.opponentLevel !== undefined && (
         <p className="venture-card__opponent-note">Facing a Level {tier.match.opponentLevel} opponent</p>
