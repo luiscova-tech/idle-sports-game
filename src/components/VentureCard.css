@@ -163,7 +163,16 @@
   font-variant-numeric: tabular-nums;
 }
 
-.venture-card__last-result {
+/* Shared colored win/draw/loss badge styling — used in two places with two
+   different data sources (see VentureCard.tsx): the live one in the score
+   row (bound to `currentOutcome`, this match's own already-resolved
+   status) and the "Last Result" one in the stats row (bound to
+   `tier.lastOutcome`, the previous match's cached result). Renamed from
+   `.venture-card__last-result` — that name only made sense for the
+   historical badge; reusing it for the live one would have been the exact
+   kind of naming-implies-meaning mismatch that made the two easy to
+   conflate in the first place. */
+.venture-card__outcome-badge {
   display: inline-block;
   font-size: 0.7rem;
   font-weight: 700;
@@ -171,17 +180,17 @@
   border-radius: 999px;
 }
 
-.venture-card__last-result--win {
+.venture-card__outcome-badge--win {
   color: var(--color-success);
   background: color-mix(in srgb, var(--color-success) 16%, transparent);
 }
 
-.venture-card__last-result--draw {
+.venture-card__outcome-badge--draw {
   color: var(--color-text-muted);
   background: var(--color-muted-surface);
 }
 
-.venture-card__last-result--loss {
+.venture-card__outcome-badge--loss {
   color: var(--color-danger);
   background: color-mix(in srgb, var(--color-danger) 16%, transparent);
 }

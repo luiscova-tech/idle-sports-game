@@ -1,5 +1,6 @@
 import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
+import { persist, createJSONStorage } from 'zustand/middleware'
+import type { StorageValue, PersistStorage } from 'zustand/middleware'
 import { advanceTick, isMatchComplete, finalizeMatch } from '../engine/tickEngine'
 import type { MatchOutcome } from '../engine/types'
 import {
@@ -176,6 +177,16 @@ export interface MilestoneNotification {
 
 interface GameState {
   isInitialized: boolean
+  /** In-band mirror of the persist middleware's own `version` option below
+   *  (see CURRENT_SCHEMA_VERSION) — kept as a plain field on the state
+   *  itself, not just invisible middleware metadata, so anyone inspecting
+   *  a save's `state` blob directly (devtools, a hand-edit, a future
+   *  session debugging a save) can see which schema it's shaped like
+   *  without needing to know zustand's outer `{state, version}` envelope
+   *  convention. zustand's OWN `version`/`migrate` mechanism below is what
+   *  actually GATES whether migration runs — this field is for visibility
+   *  only, always kept equal to it. */
+  schemaVersion: number
   tiers: VentureTier[]
   currencies: { revenue: number }
   legacy: LegacyState
@@ -192,6 +203,108 @@ interface GameState {
   dismissNotification: (id: number) => void
 }
 
+/**
+ * Schema-versioning convention — a standing rule, not a one-off fix (see
+ * CLAUDE.md "Schema versioning" for the full writeup). This project has hit
+ * three separate save-compatibility bugs across past sessions (a persisted
+ * `tiers` array silently truncating the fresh one on load, a hidden-tier
+ * reveal exploit via hand-edited `unlocked`/`managerHired` flags, and
+ * mid-match outcomes silently re-rolling under an old match schema) — each
+ * patched ad hoc, after the fact, because no past shape change was ever
+ * versioned in the first place. Going forward:
+ *
+ *   Any change to what `partialize` persists — including a shape change
+ *   nested inside something it already persists, like `VentureTier` or
+ *   `SoccerMatchState` — MUST bump CURRENT_SCHEMA_VERSION by exactly 1 and
+ *   add a new entry to SCHEMA_MIGRATIONS transforming the PREVIOUS
+ *   version's shape into the new one. Do not just change a shape in place
+ *   and hope existing saves happen to tolerate it.
+ *
+ * Not every compatibility gap needs a migration, though — some are more
+ * correctly fixed as tolerant/defensive READS at the point of use than as
+ * a data transformation. `soccerModule.ts`'s `tick()` gates its one-time
+ * outcome resolution on `tickIndex === 0`, not just `resolvedOutcome ===
+ * undefined`, specifically so a match that was already mid-flight under an
+ * OLD schema (missing `resolvedOutcome`/`opponentLevel` entirely) simply
+ * never resolves via the new model for the rest of ITS OWN lifetime,
+ * falling back to its pre-existing behavior — there is no sensible
+ * "backfilled" value migration could write for an in-progress match's
+ * resolved outcome, so tolerant reads are the right fix there, not a
+ * migration step here.
+ */
+const CURRENT_SCHEMA_VERSION = 1
+
+/**
+ * SCHEMA_MIGRATIONS[v] transforms a persisted state KNOWN to be shaped like
+ * version `v` into version `v + 1`'s shape. Applied in a loop (see
+ * migrateGameState below) from whatever version a save reports up to
+ * CURRENT_SCHEMA_VERSION — never assume migrate() is only ever called
+ * exactly one version behind; a save several versions old must walk
+ * through every intermediate step in order.
+ */
+const SCHEMA_MIGRATIONS: Record<number, (state: any) => any> = {
+  // Version 0 is every save this project had before this amendment
+  // introduced versioning at all — there was no schemaVersion field, ever,
+  // until now, so this is treated as a single baseline rather than trying
+  // to distinguish "pre-tiers-7-11" from "pre-mid-match-fix" saves (there's
+  // no data left to tell those eras apart). The one gap that genuinely
+  // needs a DATA transformation (not just a tolerant read) is a `tiers`
+  // array shorter than the current ladder — previously patched ad hoc
+  // inside `merge()` (see the ninth amendment in CLAUDE.md); moved here
+  // since "pad an old array to the current shape" is exactly what a
+  // migration step is for.
+  0: (state: any) => {
+    if (Array.isArray(state?.tiers) && state.tiers.length < SOCCER_VENTURE_TIERS.length) {
+      const permanentUpgrades = state?.legacy?.permanentUpgrades ?? createInitialPermanentUpgrades()
+      const freshTiers = createInitialTiers(permanentUpgrades)
+      state = { ...state, tiers: [...state.tiers, ...freshTiers.slice(state.tiers.length)] }
+    }
+    return state
+  },
+}
+
+function migrateGameState(persistedState: unknown, version: number): unknown {
+  let state = persistedState
+  for (let v = version; v < CURRENT_SCHEMA_VERSION; v++) {
+    const step = SCHEMA_MIGRATIONS[v]
+    if (step) state = step(state)
+  }
+  return { ...(state as object), schemaVersion: CURRENT_SCHEMA_VERSION }
+}
+
+/**
+ * Every real save this project has ever produced predates this amendment's
+ * versioning convention entirely, so its persisted blob has NO `version`
+ * field at all. zustand's own version-mismatch check only fires when the
+ * stored value has a NUMERIC version that differs from the configured one
+ * (`typeof storedVersion === 'number' && storedVersion !== options.version`
+ * — see zustand's persist middleware source) — a completely absent version
+ * fails that `typeof` check and skips `migrate()` entirely, silently using
+ * the old shape as-is. This wrapper backfills `version: 0` on read for
+ * exactly that case, so zustand's own mismatch check sees `0 !==
+ * CURRENT_SCHEMA_VERSION` and correctly invokes `migrateGameState`.
+ * Verified directly against a real short-tiers-array save (see CLAUDE.md):
+ * without this wrapper, migrate() is never called at all for a version-less
+ * save, no matter what CURRENT_SCHEMA_VERSION/migrate are set to.
+ */
+function createVersionBackfillingStorage(): PersistStorage<unknown> | undefined {
+  const base = createJSONStorage<unknown>(() => localStorage)
+  if (!base) return undefined
+  const backfill = (value: StorageValue<unknown> | null) => {
+    if (value && typeof value.version !== 'number') {
+      return { ...value, version: 0 }
+    }
+    return value
+  }
+  return {
+    ...base,
+    getItem: (name) => {
+      const result = base.getItem(name)
+      return result instanceof Promise ? result.then(backfill) : backfill(result)
+    },
+  }
+}
+
 // Wrapped in zustand's persist middleware (localStorage) per CLAUDE.md's
 // "client-side persistence for v1" — transparent to the tier/economy/engine
 // logic below, which is unaware it's being saved. partialize keeps only
@@ -200,6 +313,7 @@ export const useGameStore = create<GameState>()(
   persist(
     (set, get) => ({
       isInitialized: true,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
       tiers: createInitialTiers(createInitialLegacy().permanentUpgrades),
       currencies: { revenue: startingRevenue(createInitialLegacy().permanentUpgrades) },
       legacy: createInitialLegacy(),
@@ -541,45 +655,62 @@ export const useGameStore = create<GameState>()(
     }),
     {
       name: 'idle-sports-game-save',
+      storage: createVersionBackfillingStorage(),
+      version: CURRENT_SCHEMA_VERSION,
+      migrate: migrateGameState,
       partialize: (state) => ({
+        schemaVersion: state.schemaVersion,
         tiers: state.tiers,
         currencies: state.currencies,
         legacy: state.legacy,
         lifetimeStats: state.lifetimeStats,
         achievements: state.achievements,
       }),
-      // Save-migration fix: zustand's default merge does a shallow spread,
-      // so a persisted `tiers` array (from a save made before tiers 7-11
-      // existed) would silently REPLACE the freshly-initialized 11-entry
-      // array wholesale, leaving `tiers` shorter than SOCCER_VENTURE_TIERS
-      // for players who already have a save. If that shorter save also has
-      // prestigeCount >= 1 (so revealedTierCount() slices past the
-      // persisted length), the UI would try to render tiers whose state
-      // entry is `undefined` and crash. Pad any missing trailing entries
-      // with fresh tier state (unlocked: false, matching a never-yet-seen
-      // tier) instead of trusting the persisted length. Harmless/no-op for
-      // saves that already have a full-length `tiers` array.
+      // The `tiers`-array-length shape fix that used to live here moved
+      // into SCHEMA_MIGRATIONS[0] above — a genuine data transformation by
+      // version, not a per-load merge concern. What's left here is a
+      // standing rule that isn't version-dependent at all: `notifications`
+      // is deliberately excluded from partialize (see MilestoneNotification's
+      // doc comment: toasts must never survive a reload) — but the blind
+      // `{...currentState, ...persistedState}` spread would still copy one
+      // in if a hand-edited localStorage blob has a `notifications` key at
+      // all (this app never writes one there itself, but nothing stops a
+      // player's own edit from adding one back). An unguarded non-array
+      // value there (e.g. `null`) would crash NotificationToasts.tsx's
+      // unconditional `.length` check on the very next render; a stale
+      // array would resurrect old toasts, and any entry with a non-numeric
+      // `id` permanently poisons the `Math.max(...)+1` id generator in
+      // upgradeTier() for the rest of the session. Always keep the fresh,
+      // empty array from currentState instead — never trust a persisted
+      // value for this field, no matter its shape, no matter the version.
+      //
+      // `tiers` gets the same never-trust-the-shape treatment, for a
+      // different reason: before this session, a non-array `tiers` (e.g. a
+      // hand-edited `tiers: null`) crashed SYNCHRONOUSLY inside the old,
+      // unguarded `merge()`'s own `merged.tiers.length` check — but that
+      // throw happened inside zustand's persist internals, which swallow it
+      // in a trailing `.catch()` before `set()` is ever reached, so the live
+      // store silently kept its fresh in-memory defaults (data loss, but no
+      // crash). Moving the length-padding logic into SCHEMA_MIGRATIONS[0]
+      // added an `Array.isArray` guard that returns the corrupted value
+      // unchanged instead of throwing — and, for a save that already
+      // reports the current schema version, migrate() is skipped by zustand
+      // entirely, so a corrupted `tiers` never even reaches that guard.
+      // Either way, the corrupted value now sails cleanly through merge()
+      // into `set()`, and the very next render (`useMatchTicker`'s
+      // `s.tiers.filter(...)`, called unconditionally before any route) hard
+      // -crashes the whole app with no error boundary — worse than before,
+      // since it also blocks the only no-devtools recovery path (the
+      // Settings page's DEV wipe button). Restoring the original
+      // silently-keep-defaults behavior explicitly here, rather than
+      // depending on an accidental throw deep in a promise chain to keep
+      // providing it.
       merge: (persistedState, currentState) => {
         const merged = { ...currentState, ...(persistedState as Partial<GameState>) }
-        if (merged.tiers.length < SOCCER_VENTURE_TIERS.length) {
-          const freshTiers = createInitialTiers(merged.legacy.permanentUpgrades)
-          merged.tiers = [...merged.tiers, ...freshTiers.slice(merged.tiers.length)]
-        }
-        // `notifications` is deliberately excluded from partialize (see
-        // MilestoneNotification's doc comment: toasts must never survive a
-        // reload) — but the blind `{...currentState, ...persistedState}`
-        // spread above would still copy it in if a hand-edited localStorage
-        // blob has a `notifications` key at all (this app never writes one
-        // there itself, but nothing stops a player's own edit from adding
-        // one back). An unguarded non-array value there (e.g. `null`) would
-        // crash NotificationToasts.tsx's unconditional `.length` check on
-        // the very next render; a stale array would resurrect old toasts,
-        // and any entry with a non-numeric `id` permanently poisons the
-        // `Math.max(...)+1` id generator in upgradeTier() for the rest of
-        // the session. Always keep the fresh, empty array from
-        // currentState instead — never trust a persisted value for this
-        // field, no matter its shape.
         merged.notifications = currentState.notifications
+        if (!Array.isArray(merged.tiers) || merged.tiers.length !== SOCCER_VENTURE_TIERS.length) {
+          merged.tiers = currentState.tiers
+        }
         return merged
       },
     },

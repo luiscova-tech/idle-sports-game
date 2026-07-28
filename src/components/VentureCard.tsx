@@ -113,13 +113,39 @@ function VentureCard({ tierId }: VentureCardProps) {
   // already resolved (see soccerModule.ts's resolveMatchOutcome) and these
   // two calls just read that back out — no store/economy logic changes; the
   // actual payout still only lands when the match genuinely completes.
+  //
+  // `currentOutcome` is the SINGLE authoritative read of this tier's
+  // CURRENT (in-progress or freshly-started) match's outcome — every place
+  // in this card that displays "what's this match's outcome" (the live pill
+  // next to the score, and the projection line) reads this exact same
+  // value, never a second independent computation. Before this fix, the
+  // pill next to the score instead showed `tier.lastOutcome` — the
+  // PREVIOUS match's cached result, a genuinely different value from a
+  // genuinely different match, displayed immediately adjacent to the
+  // CURRENT match's live score. That's not a bug in either value
+  // individually (both were internally correct for what they represented),
+  // but showing them side by side, with nothing distinguishing "last
+  // match's result" from "this match's live status," read as an
+  // inconsistency to a player watching the score. `tier.lastOutcome` is
+  // still shown below (see the stats row) — clearly labeled as history,
+  // not live status.
   const progressPercent = Math.round(
     (tier.match.elapsedTicks / DEFAULT_SOCCER_CONFIG.ticksPerMatch) * 100,
   )
-  const projectedOutcome = getOutcome(tier.match)
-  const projectedPerformanceFactor = getPerformanceFactor(tier.match)
+  // A freshly-reset match (elapsedTicks === 0, right after completion or a
+  // brand-new unlock) has no resolved outcome yet, and getOutcome()'s
+  // fallback for that case (tie-break on a 0-0 raw score) resolves to
+  // 'draw' — correct as a fallback for a genuinely-unresolvable state, but
+  // actively misleading if shown as a live result for a match that hasn't
+  // had a single tick, adversarially found to flash a spurious "DRAW" badge
+  // (with a real-looking flat-draw payout projection) on every single
+  // match completion and every fresh tier unlock. Gate both the live badge
+  // and the projection line on the match having actually started.
+  const matchStarted = tier.match.elapsedTicks > 0
+  const currentOutcome = getOutcome(tier.match)
+  const currentPerformanceFactor = getPerformanceFactor(tier.match)
   const projectedPayout = Math.round(
-    calculateMatchRevenue(projectedOutcome, projectedPerformanceFactor) *
+    calculateMatchRevenue(currentOutcome, currentPerformanceFactor) *
       config.baseRevenueMultiplier *
       trainingEffectMultiplier(tier.level) *
       legacyRevenueMultiplier,
@@ -140,11 +166,9 @@ function VentureCard({ tierId }: VentureCardProps) {
       <div className="venture-card__score">
         {tier.match.homeScore} - {tier.match.awayScore}
         <span className="venture-card__clock">{tier.match.elapsedTicks}'</span>
-        {tier.lastOutcome && (
-          <span
-            className={`venture-card__last-result venture-card__last-result--${tier.lastOutcome}`}
-          >
-            {OUTCOME_LABEL[tier.lastOutcome]}
+        {matchStarted && (
+          <span className={`venture-card__outcome-badge venture-card__outcome-badge--${currentOutcome}`}>
+            {OUTCOME_LABEL[currentOutcome]}
           </span>
         )}
       </div>
@@ -152,10 +176,12 @@ function VentureCard({ tierId }: VentureCardProps) {
       <div className="venture-card__progress-track">
         <div className="venture-card__progress-fill" style={{ width: `${progressPercent}%` }} />
       </div>
-      <p className="venture-card__projection">
-        If the match ended now: <strong>{OUTCOME_LABEL[projectedOutcome]}</strong>, +
-        {projectedPayout} Revenue
-      </p>
+      {matchStarted && (
+        <p className="venture-card__projection">
+          If the match ended now: <strong>{OUTCOME_LABEL[currentOutcome]}</strong>, +
+          {projectedPayout} Revenue
+        </p>
+      )}
       {tier.match.opponentLevel !== undefined && (
         <p className="venture-card__opponent-note">Facing a Level {tier.match.opponentLevel} opponent</p>
       )}
@@ -173,6 +199,16 @@ function VentureCard({ tierId }: VentureCardProps) {
           <span className="venture-card__stat-label">Lifetime</span>
           <span className="venture-card__stat-value">{tier.cumulativeRevenue}</span>
         </div>
+        {tier.lastOutcome && (
+          <div className="venture-card__stat">
+            <span className="venture-card__stat-label">Last Result</span>
+            <span
+              className={`venture-card__outcome-badge venture-card__outcome-badge--${tier.lastOutcome}`}
+            >
+              {OUTCOME_LABEL[tier.lastOutcome]}
+            </span>
+          </div>
+        )}
       </div>
 
       <div className="venture-card__actions">

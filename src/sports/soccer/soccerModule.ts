@@ -8,23 +8,31 @@ import type { SportModule, TickResult, MatchOutcome, MatchContext } from '../../
 
 /** Soccer's opaque per-match state, as seen by the engine.
  *
- *  `opponentLevel`/`resolvedOutcome` are set ONCE, on this match's very
- *  first tick (see `tick()` below), and then carried through unchanged for
- *  the rest of the match — deciding a match's outcome via one early
- *  probability roll and then re-reading it (rather than re-deriving it from
- *  score on every call) is what keeps getOutcome()/getPerformanceFactor()
- *  pure, idempotent functions of state: the live "if the match ended now"
- *  UI preview calls them repeatedly as a match progresses, and must never
- *  re-roll a different answer on every render. Both are `undefined` before
- *  the first tick, and stay `undefined` for the match's whole duration if
- *  no `context.opponentLevelRange` was ever supplied (the "no such concept"
- *  fallback — see MatchContext in engine/types.ts). */
+ *  `opponentLevel`/`resolvedOutcome`/`resolvedMargin` are set ONCE, on this
+ *  match's very first tick (see `tick()` below), and then carried through
+ *  unchanged for the rest of the match — deciding a match's outcome (and
+ *  its economic margin) via one early set of rolls and then re-reading them
+ *  (rather than re-deriving anything from the live score on every call) is
+ *  what keeps getOutcome()/getPerformanceFactor() pure, idempotent
+ *  functions of state: the live "if the match ended now" UI preview calls
+ *  them repeatedly as a match progresses, and must never re-roll a
+ *  different answer on every render. All three are `undefined` before the
+ *  first tick, and stay `undefined` for the match's whole duration if no
+ *  `context.opponentLevelRange` was ever supplied (the "no such concept"
+ *  fallback — see MatchContext in engine/types.ts).
+ *
+ *  `resolvedMargin` exists SEPARATELY from the live `homeScore`/`awayScore`
+ *  specifically so the economic margin bonus (see getPerformanceFactor)
+ *  can stay decoupled from the cosmetic score-bias mechanism in tick()
+ *  below — see that mechanism's own doc comment for why sharing one number
+ *  for both purposes turned into a real, shipped bug. */
 export interface SoccerMatchState {
   homeScore: number
   awayScore: number
   elapsedTicks: number
   opponentLevel?: number
   resolvedOutcome?: MatchOutcome
+  resolvedMargin?: number
 }
 
 /** Tunable soccer-specific rates. Widening this later with stat-driven
@@ -96,54 +104,191 @@ function resolveMatchOutcome(playerLevel: number, opponentLevel: number): MatchO
   return 'loss'
 }
 
+/** How many attempts drawResolvedMargin below makes before giving up and
+ *  falling back to the smallest margin consistent with the category. Real
+ *  per-match win/draw/loss rates hover around 53%/20%/27% (see the
+ *  historical differential-distribution simulation in CLAUDE.md), so even
+ *  the rarest target (draw, ~20%) resolves in ~5 attempts on average —
+ *  this cap only exists to guarantee termination, not because it's
+ *  expected to ever actually get hit. */
+const MARGIN_DRAW_MAX_ATTEMPTS = 50
+
+/**
+ * Draws this match's ECONOMIC margin — completely independent of tick()'s
+ * cosmetic score-bias mechanism below, and of whatever the live score
+ * happens to show — by resimulating the match's UNBIASED chance-then-
+ * conversion process (the exact same shape/rates `tick()` used before this
+ * session's score-bias existed) until one happens to land on the same
+ * category as `resolvedOutcome`, then returning ITS differential. This is
+ * what keeps the historical goal-differential calibration this file has
+ * always used for the margin bonus (see MAX_MEANINGFUL_GOAL_DIFFERENTIAL
+ * below: P(|diff|>=5) ~= 3.2% blowouts) completely unaffected by however
+ * strongly tick() biases the COSMETIC score for a satisfying visual trend —
+ * the two are decided by two genuinely separate draws, only constrained to
+ * agree in CATEGORY (never in exact value), so tuning one can never again
+ * silently distort the other. Called exactly once per match, at the same
+ * moment as resolveMatchOutcome above. */
+function drawResolvedMargin(resolvedOutcome: MatchOutcome, config: SoccerConfig): number {
+  for (let attempt = 0; attempt < MARGIN_DRAW_MAX_ATTEMPTS; attempt++) {
+    let home = 0
+    let away = 0
+    for (let t = 0; t < config.ticksPerMatch; t++) {
+      if (Math.random() < config.homeChancePerTick && Math.random() < config.homeConversionRate) home++
+      if (Math.random() < config.awayChancePerTick && Math.random() < config.awayConversionRate) away++
+    }
+    const diff = home - away
+    if (resolvedOutcome === 'win' && diff > 0) return diff
+    if (resolvedOutcome === 'loss' && diff < 0) return diff
+    if (resolvedOutcome === 'draw' && diff === 0) return 0
+  }
+  return resolvedOutcome === 'win' ? 1 : resolvedOutcome === 'loss' ? -1 : 0
+}
+
+/**
+ * How strongly this match's ALREADY-DECIDED resolvedOutcome (see
+ * resolveMatchOutcome above) biases the cosmetic tick-by-tick "flavor"
+ * scoring for the rest of the match, so the visible run of play trends
+ * toward that outcome across the WHOLE match rather than being disconnected
+ * from it until the final-tick safety-net nudge below. Ramps linearly from
+ * 0 (first tick) to this value (final tick) via `progress =
+ * tickIndex / (ticksPerMatch - 1)` — deliberately gradual, not a step
+ * function, so it reads as "the run of play increasingly favors one side"
+ * rather than a sudden shift partway through.
+ *
+ * Simulated before picking this value: biasing `conversionRate` ALONE
+ * (leaving `chancePerTick` unbiased) left 25-70% of matches still needing
+ * the final-tick nudge even at strong bias values, because the underlying
+ * scoring process is too infrequent (~7 scoring chances per match per side)
+ * for a finishing-only bias to reliably overcome variance — a side with a
+ * boosted conversion rate still scores nothing if it never gets a chance to
+ * convert. Biasing BOTH `chancePerTick` AND `conversionRate` together
+ * brought the nudge-needed rate down to ~1-5% for 'win'/'loss' at strength
+ * 1.2 (a 'draw's exact-equality target is a harder statistical ask by
+ * nature and still needs the nudge ~36% of the time — but only ever by a
+ * single goal, a plausible-looking late equalizer, not a jarring rewrite).
+ *
+ * IMPORTANT — this constant affects ONLY the cosmetic score display, never
+ * the economy, and that separation is load-bearing, not incidental. An
+ * earlier version of this fix fed the resulting (now heavily blowout-
+ * skewed) live score straight into getPerformanceFactor()'s margin bonus,
+ * the same way pre-this-session code always had — an adversarial review
+ * caught that this silently inflated average win revenue by ~28% (P(a win
+ * is a >=5 differential "blowout") rose from the historically-calibrated
+ * ~2.7% to ~67%, since a strong-enough bias to reliably fix the SIGN also
+ * reliably produces a bigger MAGNITUDE). Fixed by drawing a wholly separate
+ * `resolvedMargin` (see drawResolvedMargin above) from the ORIGINAL
+ * unbiased process for economic purposes, so SCORE_BIAS_STRENGTH can be
+ * tuned purely for how convincing the cosmetic trend looks, with zero
+ * economic side effects — see CLAUDE.md for the full incident writeup.
+ */
+const SCORE_BIAS_STRENGTH = 1.2
+const BIASED_RATE_MIN = 0.02
+const BIASED_RATE_MAX = 0.95
+
+function clampRate(rate: number): number {
+  return Math.min(BIASED_RATE_MAX, Math.max(BIASED_RATE_MIN, rate))
+}
+
+/**
+ * Which side this tick's flavor scoring should currently favor, given the
+ * match's resolved outcome — `true` favors home, `false` favors away,
+ * `null` means no bias at all (outcome not yet resolved — the "no such
+ * concept" fallback, matching resolvedOutcome itself). For 'win'/'loss'
+ * this is a FIXED direction for the whole match — a resolved loss should
+ * increasingly favor the opponent throughout, not just near the end. For
+ * 'draw' there is no fixed side to favor (the target is convergence, not
+ * either team), so it dynamically favors whichever side is CURRENTLY
+ * behind (using the score as of the START of this tick, before this tick's
+ * own scoring rolls) — a draw trends toward closing whatever gap has
+ * opened, rather than toward a fixed team.
+ */
+function scoreBiasFavorsHome(
+  resolvedOutcome: MatchOutcome | undefined,
+  homeScoreBeforeThisTick: number,
+  awayScoreBeforeThisTick: number,
+): boolean | null {
+  if (resolvedOutcome === 'win') return true
+  if (resolvedOutcome === 'loss') return false
+  if (resolvedOutcome === 'draw') {
+    if (homeScoreBeforeThisTick > awayScoreBeforeThisTick) return false
+    if (homeScoreBeforeThisTick < awayScoreBeforeThisTick) return true
+  }
+  return null
+}
+
 function tick(
   state: SoccerMatchState,
   tickIndex: number,
   config: SoccerConfig,
   context?: MatchContext,
 ): TickResult<SoccerMatchState> {
-  let { homeScore, awayScore, opponentLevel, resolvedOutcome } = state
+  let { homeScore, awayScore, opponentLevel, resolvedOutcome, resolvedMargin } = state
   let scoringEvent = false
 
-  // First tick of a fresh match: draw this match's opponent level and
-  // resolve its outcome, once, up front — see resolveMatchOutcome above and
-  // the SoccerMatchState doc comment for why this must happen exactly once
+  // First tick of a fresh match: draw this match's opponent level, resolve
+  // its outcome, and separately draw its ECONOMIC margin, once, up front —
+  // see resolveMatchOutcome/drawResolvedMargin above and the
+  // SoccerMatchState doc comment for why this must happen exactly once
   // rather than being re-derived on every getOutcome()/getPerformanceFactor()
   // call. A module with no opponentLevelRange in context (or no context at
-  // all) leaves both fields undefined for the whole match — the "no such
-  // concept" fallback, matching every other optional-capability rule here.
+  // all) leaves all three fields undefined for the whole match — the "no
+  // such concept" fallback, matching every other optional-capability rule
+  // here.
   //
   // Gated on `tickIndex === 0`, not just `resolvedOutcome === undefined` —
   // deliberately, to protect a save persisted from BEFORE this field
-  // existed: a tier that was mid-match (tickIndex > 0) under the old
+  // existed: a tier that was mid-match (tickIndex > 0) under an older
   // SoccerMatchState shape has no `resolvedOutcome` key at all after
   // JSON-parsing from localStorage, which would otherwise look identical to
   // "this match's first tick" and trigger a fresh, disconnected-from-the-
   // score resolution partway through — then the final-tick nudge below
   // would rewrite whatever lead the player had already built up to match
   // it. Requiring tickIndex===0 means such a match instead simply never
-  // resolves for the rest of ITS lifetime (resolvedOutcome stays undefined
-  // all the way to completion), so getOutcome() falls back to comparing its
-  // real final score — exactly the pre-this-session behavior — and only
-  // the NEXT match (starting fresh at tickIndex 0) uses the new model.
+  // resolves for the rest of ITS lifetime (resolvedOutcome/resolvedMargin
+  // stay undefined all the way to completion), so getOutcome() falls back
+  // to comparing its real final score — exactly the pre-resolution-model
+  // behavior — and only the NEXT match (starting fresh at tickIndex 0)
+  // uses the new model.
   if (tickIndex === 0 && resolvedOutcome === undefined && context?.opponentLevelRange) {
     const { min, max } = context.opponentLevelRange
     opponentLevel = min + Math.floor(Math.random() * (max - min + 1))
     resolvedOutcome = resolveMatchOutcome(context.level ?? 1, opponentLevel)
+    resolvedMargin = drawResolvedMargin(resolvedOutcome, config)
   }
 
   // Home/away scoring stays the same chance-then-conversion shape as
-  // before, but is now purely decorative match "flavor" (the live score
-  // ticker, progress bar) — level/opponent no longer bias it. The outcome
-  // that actually pays out is decided above, not by comparing these scores.
-  if (Math.random() < config.homeChancePerTick) {
-    if (Math.random() < config.homeConversionRate) {
+  // before — this is still purely decorative match "flavor" (the live
+  // score ticker, progress bar); it does not decide the payout, which was
+  // already fixed above. What's new: the rates themselves are now biased
+  // toward the resolved outcome, growing across the match (see
+  // SCORE_BIAS_STRENGTH above), so the visible run of play actually trends
+  // toward that outcome throughout — not just via the final-tick safety
+  // net below. Uses the score as of the START of this tick (before either
+  // side's roll this tick) to decide which side a 'draw' currently favors.
+  const favorsHome = scoreBiasFavorsHome(resolvedOutcome, homeScore, awayScore)
+  let homeChance = config.homeChancePerTick
+  let awayChance = config.awayChancePerTick
+  let homeConversionRate = config.homeConversionRate
+  let awayConversionRate = config.awayConversionRate
+  if (favorsHome !== null) {
+    const progress = tickIndex / (config.ticksPerMatch - 1)
+    const strength = SCORE_BIAS_STRENGTH * progress
+    const boost = 1 + strength
+    const cut = 1 - strength
+    homeChance = clampRate(config.homeChancePerTick * (favorsHome ? boost : cut))
+    awayChance = clampRate(config.awayChancePerTick * (favorsHome ? cut : boost))
+    homeConversionRate = clampRate(config.homeConversionRate * (favorsHome ? boost : cut))
+    awayConversionRate = clampRate(config.awayConversionRate * (favorsHome ? cut : boost))
+  }
+
+  if (Math.random() < homeChance) {
+    if (Math.random() < homeConversionRate) {
       homeScore += 1
       scoringEvent = true
     }
   }
-  if (Math.random() < config.awayChancePerTick) {
-    if (Math.random() < config.awayConversionRate) {
+  if (Math.random() < awayChance) {
+    if (Math.random() < awayConversionRate) {
       awayScore += 1
       scoringEvent = true
     }
@@ -172,6 +317,7 @@ function tick(
       elapsedTicks: tickIndex + 1,
       opponentLevel,
       resolvedOutcome,
+      resolvedMargin,
     },
     scoringEvent,
   }
@@ -201,28 +347,6 @@ function resolvedOutcomeOf(state: SoccerMatchState): MatchOutcome {
   return state.resolvedOutcome ?? rawOutcomeOf(state)
 }
 
-/**
- * The goal differential to report for margin-bonus purposes, GUARANTEED
- * consistent in sign with resolvedOutcomeOf() for the same state — even
- * mid-match, before the final-tick nudge in tick() above has had a chance
- * to actually align the flavor score with the resolved outcome. Without
- * this, a mid-match live preview could show e.g. "LOSS" (from
- * resolvedOutcome) while the flavor score currently happens to have home
- * ahead by chance, and a naive differential would report a decisive-WIN-
- * shaped factor for a match that's actually paying out as a loss — the
- * exact bonus-leak bug shape from last session, reopened via a new gap.
- * When the raw differential's sign already agrees with resolvedOutcome (the
- * overwhelmingly common case, and always true once the final-tick nudge has
- * run), this returns it unchanged. */
-function resolvedDifferential(state: SoccerMatchState): number {
-  const raw = state.homeScore - state.awayScore
-  if (state.resolvedOutcome === undefined) return raw
-  if (state.resolvedOutcome === 'win' && raw <= 0) return 1
-  if (state.resolvedOutcome === 'loss' && raw >= 0) return -1
-  if (state.resolvedOutcome === 'draw' && raw !== 0) return 0
-  return raw
-}
-
 /** Exported so UI can derive a live "if the match ended now" projected
  *  outcome from mid-match state, reusing the exact same logic the engine
  *  uses at actual match completion — never duplicated in a component. Once
@@ -238,20 +362,33 @@ export function getOutcome(state: SoccerMatchState): MatchOutcome {
 
 /** The most meaningful goal differential for margin-bonus purposes — beyond
  *  this, an even bigger blowout doesn't add further bonus. Simulated against
- *  400k matches of the real tick probabilities above: P(|differential| >= 5)
- *  ~= 3.2%, and specifically P(a win by >= 5) ~= 2.7% — a real but genuinely
- *  rare "blowout" tail, not something an average match brushes up against
- *  (the median-ish differential band is 0-2). */
+ *  400k matches of the real (unbiased) tick probabilities above: P(|
+ *  differential| >= 5) ~= 3.2%, and specifically P(a win by >= 5) ~= 2.7% —
+ *  a real but genuinely rare "blowout" tail, not something an average match
+ *  brushes up against (the median-ish differential band is 0-2). This stays
+ *  true of `resolvedMargin` (see drawResolvedMargin above) regardless of
+ *  how the cosmetic score in tick() is biased, specifically BECAUSE
+ *  `resolvedMargin` is drawn from that same original unbiased process. */
 const MAX_MEANINGFUL_GOAL_DIFFERENTIAL = 5
 
-/** Exported for the same drift-proof-preview reason as getOutcome above:
- *  economy.ts's margin bonus (see calculateMatchRevenue) only ever consumes
- *  this generic 0-1 number — 0 = most lopsided possible loss, 0.5 = neutral
- *  (any draw sits exactly here), 1 = most decisive possible win. Linear in
- *  the (resolved-consistent — see resolvedDifferential above) differential
- *  between the two clamped extremes. */
+/**
+ * Exported for the same drift-proof-preview reason as getOutcome above:
+ * economy.ts's margin bonus (see calculateMatchRevenue) only ever consumes
+ * this generic 0-1 number — 0 = most lopsided possible loss, 0.5 = neutral
+ * (any draw sits exactly here), 1 = most decisive possible win. Linear in
+ * the clamped differential between the two extremes.
+ *
+ * Reads `state.resolvedMargin` — the economic margin drawn once at
+ * resolution (see drawResolvedMargin above), deliberately SEPARATE from the
+ * live, cosmetically-biased `homeScore`/`awayScore` — rather than the live
+ * score itself. Falls back to the raw live differential only when
+ * `resolvedMargin` was never drawn (no `context.opponentLevelRange` ever
+ * supplied — the same "no such concept" case `resolvedOutcomeOf` falls back
+ * for, where the live score IS the authoritative truth, exactly as it was
+ * before any of this session's or last session's resolution model existed).
+ */
 export function getPerformanceFactor(state: SoccerMatchState): number {
-  const diff = resolvedDifferential(state)
+  const diff = state.resolvedMargin ?? state.homeScore - state.awayScore
   const clamped = Math.max(
     -MAX_MEANINGFUL_GOAL_DIFFERENTIAL,
     Math.min(MAX_MEANINGFUL_GOAL_DIFFERENTIAL, diff),
