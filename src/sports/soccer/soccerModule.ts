@@ -4,7 +4,7 @@
 // the only file allowed to say "goal", "chance", "possession", or "shot".
 // ============================================================
 
-import type { SportModule, TickResult, MatchOutcome } from '../../engine/types'
+import type { SportModule, TickResult, MatchOutcome, MatchContext } from '../../engine/types'
 
 /** Soccer's opaque per-match state, as seen by the engine. */
 export interface SoccerMatchState {
@@ -73,13 +73,74 @@ function tick(
   }
 }
 
-/** Exported so UI can derive a live "if the match ended now" projected
- *  outcome from mid-match state, reusing the exact same logic the engine
- *  uses at actual match completion — never duplicated in a component. */
-export function getOutcome(state: SoccerMatchState): MatchOutcome {
+function rawOutcomeOf(state: SoccerMatchState): MatchOutcome {
   if (state.homeScore > state.awayScore) return 'win'
   if (state.homeScore === state.awayScore) return 'draw'
   return 'loss'
+}
+
+/** Whether the raw outcome is a 'win' that context's minWinLevel gates
+ *  away. Shared by getOutcome AND getPerformanceFactor below — they MUST
+ *  agree on this, since a caller (economy.ts's calculateMatchRevenue) pairs
+ *  up whatever the two return. An earlier version of this file computed the
+ *  downgrade only inside getOutcome and left getPerformanceFactor reading
+ *  the raw score unconditionally: a downgraded win (label 'draw') still
+ *  reported its real, non-neutral goal-differential factor, so economy.ts's
+ *  margin bonus — which is only ever supposed to apply to a genuine
+ *  decisive win — leaked a bonus into what was actually paid out as a
+ *  'draw'. Computing the gate once and feeding both functions from it makes
+ *  that drift structurally impossible. */
+function isGatedWin(rawOutcome: MatchOutcome, context?: MatchContext): boolean {
+  return rawOutcome === 'win' && context?.minWinLevel !== undefined && (context.level ?? 0) < context.minWinLevel
+}
+
+/** Exported so UI can derive a live "if the match ended now" projected
+ *  outcome from mid-match state, reusing the exact same logic the engine
+ *  uses at actual match completion — never duplicated in a component.
+ *
+ *  `context` (optional — see MatchContext in engine/types.ts) supports the
+ *  "minimum training level to win" mechanic: if the caller supplies
+ *  `minWinLevel` and the current `level` falls short of it, a would-be win
+ *  is downgraded to a draw — "trained enough to not lose, not enough to
+ *  close it out." A raw draw/loss is never affected either way. Omitting
+ *  context entirely (undefined) applies no gating at all, matching every
+ *  other optional-capability rule in this codebase. */
+export function getOutcome(state: SoccerMatchState, context?: MatchContext): MatchOutcome {
+  const rawOutcome = rawOutcomeOf(state)
+  return isGatedWin(rawOutcome, context) ? 'draw' : rawOutcome
+}
+
+/** The most meaningful goal differential for margin-bonus purposes — beyond
+ *  this, an even bigger blowout doesn't add further bonus. Simulated against
+ *  400k matches of the real tick probabilities above: P(|differential| >= 5)
+ *  ~= 3.2%, and specifically P(a win by >= 5) ~= 2.7% — a real but genuinely
+ *  rare "blowout" tail, not something an average match brushes up against
+ *  (the median-ish differential band is 0-2). */
+const MAX_MEANINGFUL_GOAL_DIFFERENTIAL = 5
+
+/** Exported for the same drift-proof-preview reason as getOutcome above:
+ *  economy.ts's margin bonus (see calculateMatchRevenue) only ever consumes
+ *  this generic 0-1 number — 0 = most lopsided possible loss, 0.5 = neutral
+ *  (any draw, regardless of score, sits exactly here since its differential
+ *  is 0 by definition), 1 = most decisive possible win. Linear in the
+ *  differential between the two clamped extremes.
+ *
+ *  `context` MUST be the same object passed to getOutcome() for the same
+ *  state (see isGatedWin above) — when getOutcome would downgrade a win to
+ *  a draw, this returns exactly 0.5 (neutral), the same factor a genuine
+ *  draw reports, regardless of the real score. Without that, a downgraded
+ *  win's real (non-neutral) differential would still feed economy.ts's
+ *  margin bonus even though it's being paid out as a flat 'draw'. */
+export function getPerformanceFactor(state: SoccerMatchState, context?: MatchContext): number {
+  const rawOutcome = rawOutcomeOf(state)
+  if (isGatedWin(rawOutcome, context)) return 0.5
+
+  const diff = state.homeScore - state.awayScore
+  const clamped = Math.max(
+    -MAX_MEANINGFUL_GOAL_DIFFERENTIAL,
+    Math.min(MAX_MEANINGFUL_GOAL_DIFFERENTIAL, diff),
+  )
+  return (clamped + MAX_MEANINGFUL_GOAL_DIFFERENTIAL) / (2 * MAX_MEANINGFUL_GOAL_DIFFERENTIAL)
 }
 
 export function createSoccerModule(
@@ -91,6 +152,7 @@ export function createSoccerModule(
     createInitialState,
     tick: (state, tickIndex) => tick(state, tickIndex, config),
     getOutcome,
+    getPerformanceFactor,
   }
 }
 
@@ -195,8 +257,8 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
   // ~4.2x upgrade-base-cost growth, same +0.05-per-tier upgradeCostGrowth,
   // same gently-decreasing baseRevenueMultiplier ratio (2.8 -> 2.75 -> 2.70
   // -> 2.65 -> 2.60 -> 2.55) — no new balance philosophy introduced. These
-  // stay invisible in the UI (see TIERS_REVEALED_BEFORE_PRESTIGE below)
-  // until a player's first prestige, per that mechanic's design.
+  // stay invisible in the UI (see revealedTierCount below) until revealed
+  // one at a time by successive prestiges, per that mechanic's design.
   {
     id: 'legends-circuit',
     name: "The Legends' Gauntlet",
@@ -258,30 +320,134 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
  *  stays correct no matter how many more tiers get appended later. */
 export const FIRST_PRESTIGE_TRIGGER_TIER_ID = 'world-championship'
 
-/** How many tiers (from the front of SOCCER_VENTURE_TIERS) are visible
- *  before a player's first prestige. Tiers beyond this index don't
- *  exist/render/get referenced in the UI at all until `legacy.hasPrestiged`
- *  is true — see Home.tsx and `isTierRevealed` below. Derived from
+/** How many tiers (from the front of SOCCER_VENTURE_TIERS) are visible from
+ *  the very start, before any prestige. Derived from
  *  FIRST_PRESTIGE_TRIGGER_TIER_ID rather than a second hand-maintained
  *  number, so the reveal boundary and the prestige-trigger tier can never
  *  silently drift apart. */
-export const TIERS_REVEALED_BEFORE_PRESTIGE =
+export const TIERS_REVEALED_AT_START =
   SOCCER_VENTURE_TIERS.findIndex((c) => c.id === FIRST_PRESTIGE_TRIGGER_TIER_ID) + 1
 
+/** How many of tiers 7-11 (legends-circuit onward) CAN ever be revealed by
+ *  prestiging — exactly the remainder of the ladder past the starting
+ *  reveal boundary. Kept as its own constant (rather than a hardcoded 5) so
+ *  it stays correct if the ladder is ever extended further. */
+export const MAX_POST_PRESTIGE_REVEALS = SOCCER_VENTURE_TIERS.length - TIERS_REVEALED_AT_START
+
+/**
+ * How many tiers (from the front of SOCCER_VENTURE_TIERS) are visible given
+ * a player's current `prestigeCount`. Supersedes the original "all of tiers
+ * 7-11 reveal at once on first prestige" behavior — now exactly ONE
+ * additional hidden tier reveals per COMPLETED prestige (tier 7 after
+ * prestige #1, tier 8 after #2, ... tier 11 after #5), and reveals stop
+ * there: `Math.min(prestigeCount, MAX_POST_PRESTIGE_REVEALS)` caps the bonus
+ * at 5 regardless of how many further times a player prestiges. There is no
+ * minimum time/earnings gate on top of this — a player who prestiges in
+ * rapid succession reveals tiers just as fast; that's an accepted trade-off
+ * (they're also giving up more mid-run progress each time to do it), not
+ * something this function tries to prevent. */
+export function revealedTierCount(prestigeCount: number): number {
+  return TIERS_REVEALED_AT_START + Math.min(prestigeCount, MAX_POST_PRESTIGE_REVEALS)
+}
+
 /** Whether the tier at `tierIndex` is allowed to exist/be interacted with
- *  right now. This is the single authoritative check for the reveal
- *  boundary — every store action that touches a tier (tick/upgrade/hire
- *  manager/unlock) calls this, not just Home.tsx's render slice, so tiers
- *  7-11 can't be made to earn real Revenue (e.g. via a hand-edited
- *  localStorage save flipping `unlocked` directly) before a player has
- *  actually prestiged once. */
-export function isTierRevealed(tierIndex: number, hasPrestiged: boolean): boolean {
-  return tierIndex < TIERS_REVEALED_BEFORE_PRESTIGE || hasPrestiged
+ *  right now, given the current `prestigeCount`. This is the single
+ *  authoritative check for the reveal boundary — every store action that
+ *  touches a tier (tick/upgrade/hire manager/unlock) calls this, not just
+ *  Home.tsx's render slice, so a not-yet-revealed tier can't be made to earn
+ *  real Revenue (e.g. via a hand-edited localStorage save flipping
+ *  `unlocked` directly) before it's actually been revealed. */
+export function isTierRevealed(tierIndex: number, prestigeCount: number): boolean {
+  return tierIndex < revealedTierCount(prestigeCount)
 }
 
 /** Revenue cost to raise a tier currently at `currentLevel` to the next level. */
 export function tierUpgradeCost(config: SoccerVentureTierConfig, currentLevel: number): number {
   return Math.round(config.upgradeBaseCost * config.upgradeCostGrowth ** (currentLevel - 1))
+}
+
+/**
+ * Compounding-doubling "Improve Training" milestones. Crossing a level in
+ * this list DOUBLES the cumulative training effect from that point forward
+ * (stacking: crossing N milestones multiplies by 2^N) — not a flat lookup
+ * table, an actual running multiplier, so the boost from an earlier
+ * milestone is still there when a later one is crossed.
+ *
+ * Levels (and their widening gaps: 7, 9, 12, 16, 20, 25, 30, 35, 40) were
+ * derived by simulating this game's REAL per-tier cost/revenue curves (see
+ * CLAUDE.md "Milestone multipliers" for the full derivation), not chosen as
+ * round numbers: without any milestone boost, this economy's exponential
+ * upgradeCostGrowth (1.6-2.05x per level) against linear-in-level revenue
+ * means the level-up cadence itself grows ~g times slower every level, so a
+ * fixed absolute level number becomes many-days-then-effectively-unreachable
+ * within a few dozen levels at every tier, regardless of that tier's own
+ * baseRevenueMultiplier (which only shifts the wall by a few levels, since
+ * it's a constant factor against an exponential). The doubling exists
+ * specifically to keep pushing that wall back out. Early milestones (6, 13,
+ * 22) land within single-digit minutes to about an hour of dedicated
+ * training investment at any tier; by design (matching Cookie Clicker's own
+ * high-count building milestones) the later ones (125+) are long-horizon,
+ * many-real-days goals for only the most dedicated single-tier grinding —
+ * not something an average session is expected to reach. */
+export const TRAINING_MILESTONE_LEVELS = [6, 13, 22, 34, 50, 70, 95, 125, 160, 200]
+
+/** The actual training-driven revenue multiplier at a given "Improve
+ *  Training" level — `level` scaled linearly as before, times 2 for every
+ *  milestone in TRAINING_MILESTONE_LEVELS that level has reached or passed.
+ *  Used everywhere a tier's level currently scales revenue (per-tick,
+ *  match-completion bonus) — see tierPerTickRevenue below and
+ *  useGameStore.ts's completion-bonus calculation. Does NOT affect
+ *  tierUpgradeCost, which stays keyed on the raw level exactly as before —
+ *  only the revenue side of training gets the milestone boost. */
+export function trainingEffectMultiplier(level: number): number {
+  let milestonesPassed = 0
+  for (const milestone of TRAINING_MILESTONE_LEVELS) {
+    if (level >= milestone) milestonesPassed += 1
+  }
+  return level * 2 ** milestonesPassed
+}
+
+/**
+ * Minimum "Improve Training" level required before a 'win' outcome is
+ * achievable at this tier at all (see getOutcome's `context.minWinLevel` in
+ * this file, and MatchContext in engine/types.ts) — below it, only
+ * draw/loss can occur, full stop, no partial win chance. A flat `tierIndex +
+ * 1` (1 for tier 0, escalating by exactly one level per tier, capping at 11
+ * for The Multiverse Cup): simulated against the same real cost/revenue
+ * curves used for the milestones above, this keeps every tier's very first
+ * possible win within single-digit-minutes of dedicated manual play at the
+ * low tiers, and a genuine but never-impossible few-hours-to-low-single-
+ * digit-days investment at the very top tier (The Multiverse Cup, level 11)
+ * — steeper escalation (e.g. doubling per tier) was tried and rejected
+ * during simulation because this economy's exponential per-level cost
+ * growth makes even level ~20-30 already many-days-to-unreachable at the
+ * top tiers, which would make a top tier's win outcome effectively
+ * impossible forever — the opposite of the intended "escalating but always
+ * eventually achievable" gate. */
+export function minWinLevelForTier(tierIndex: number): number {
+  return tierIndex + 1
+}
+
+/** Real-world milliseconds between auto-play ticks for the tier at
+ *  `tierIndex` — ONLY consumed by the idle auto-tick interval
+ *  (useMatchTicker.ts); a manual "Push the Attack" click always resolves a
+ *  tick instantly regardless of tier, by construction (it calls tickTier()
+ *  directly, never through this interval). Match length stays a fixed 90
+ *  ticks at every tier (unchanged) — this only stretches how long an
+ *  automated manager takes to grind through those 90 ticks. Geometric
+ *  growth from the pre-existing 600ms base (tier 0's pacing is completely
+ *  unchanged from before this session, preserving all of its prior
+ *  playtesting/balance), at a fixed 1.4x per tier: tier 0 stays a ~54s
+ *  auto-match, climbing to a ~26-minute auto-match at tier 10 (The
+ *  Multiverse Cup) — a ~29x spread top to bottom. Chosen so the highest
+ *  tiers feel meaningfully more "epic"/slow on auto-play (rewarding active
+ *  manual clicking, or patience) without making any tier's automation take
+ *  implausibly long (hours+) per match. */
+export const BASE_AUTO_TICK_INTERVAL_MS = SOCCER_TICK_INTERVAL_MS
+const AUTO_TICK_INTERVAL_GROWTH_PER_TIER = 1.4
+
+export function autoTickIntervalMsForTier(tierIndex: number): number {
+  return Math.round(BASE_AUTO_TICK_INTERVAL_MS * AUTO_TICK_INTERVAL_GROWTH_PER_TIER ** tierIndex)
 }
 
 /** Base direct Revenue granted per tick (manual click or automated) at
@@ -293,8 +459,10 @@ export const BASE_PER_TICK_REVENUE = 4
 /** Direct Revenue granted for a single tick at this tier/level — the
  *  "clicking is the primary generator" amount, added every tick (manual or
  *  auto) on top of the existing match-completion bonus. Scales by the same
- *  baseRevenueMultiplier * level factor the completion bonus already uses,
- *  so relative tier/level progression stays consistent between the two. */
+ *  baseRevenueMultiplier * trainingEffectMultiplier(level) factor the
+ *  completion bonus already uses (see useGameStore.ts), so relative
+ *  tier/level progression — including milestone doublings — stays
+ *  consistent between the two. */
 export function tierPerTickRevenue(config: SoccerVentureTierConfig, level: number): number {
-  return Math.round(BASE_PER_TICK_REVENUE * config.baseRevenueMultiplier * level)
+  return Math.round(BASE_PER_TICK_REVENUE * config.baseRevenueMultiplier * trainingEffectMultiplier(level))
 }

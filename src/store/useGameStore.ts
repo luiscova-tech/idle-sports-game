@@ -19,6 +19,8 @@ import {
   SOCCER_VENTURE_TIERS,
   tierUpgradeCost,
   tierPerTickRevenue,
+  trainingEffectMultiplier,
+  minWinLevelForTier,
   FIRST_PRESTIGE_TRIGGER_TIER_ID,
   isTierRevealed,
 } from '../sports/soccer/soccerModule'
@@ -70,13 +72,18 @@ export interface LegacyState {
   /** Permanent, never reset by resetForLegacy(). Spendable currency earned
    *  by prestiging — its own currency type, cleanly separated from Revenue. */
   legacyPoints: number
-  /** True forever once the player has prestiged at least once. Gates
-   *  whether tiers 7-11 (`legends-circuit` onward) exist/render in the UI
-   *  at all — see `TIERS_REVEALED_BEFORE_PRESTIGE` in `soccerModule.ts` and
-   *  `Home.tsx`. Once true it never reverts on a `resetForLegacy()` reset
-   *  (that's the whole point — the reveal is permanent), only on a full
-   *  `resetProgress()` wipe. */
+  /** True forever once the player has prestiged at least once. Never
+   *  reverts on a `resetForLegacy()` reset, only on a full `resetProgress()`
+   *  wipe. Still used to gate the Legacy panel's reset-vs-locked UI; the
+   *  actual per-tier reveal boundary is driven by `prestigeCount` below
+   *  (see `revealedTierCount`/`isTierRevealed` in `soccerModule.ts`), since
+   *  tiers 7-11 now reveal one at a time across successive prestiges rather
+   *  than all at once on this flag flipping true. */
   hasPrestiged: boolean
+  /** How many times the player has prestiged, ever. Never reset by
+   *  `resetForLegacy()` (only by `resetProgress()`'s full wipe). Drives how
+   *  many of tiers 7-11 are revealed — see `revealedTierCount` in
+   *  `soccerModule.ts`. */
   prestigeCount: number
   permanentUpgrades: PermanentUpgradeLevels
 }
@@ -197,13 +204,19 @@ export const useGameStore = create<GameState>()(
         if (tierIndex === -1) return
         const tier = tiers[tierIndex]
         if (!tier.unlocked) return
-        // Defense in depth: tiers 7-11 must never earn real Revenue before
-        // a player's first prestige, even if `unlocked`/`managerHired` were
-        // somehow set directly (e.g. a hand-edited localStorage save) —
-        // this is the actual choke point, not just Home.tsx's render slice.
-        if (!isTierRevealed(tierIndex, legacy.hasPrestiged)) return
+        // Defense in depth: a not-yet-revealed tier must never earn real
+        // Revenue, even if `unlocked`/`managerHired` were somehow set
+        // directly (e.g. a hand-edited localStorage save) — this is the
+        // actual choke point, not just Home.tsx's render slice.
+        if (!isTierRevealed(tierIndex, legacy.prestigeCount)) return
 
-        const { state: nextMatch } = advanceTick(soccerModule, tier.match, tier.tickIndex)
+        // Threaded into both advanceTick and finalizeMatch below so the
+        // sport module can gate 'win' outcomes on this tier's own training
+        // level (see MatchContext in engine/types.ts and getOutcome in
+        // soccerModule.ts) — soccer's tick() itself ignores it, only
+        // getOutcome() consumes it.
+        const matchContext = { level: tier.level, minWinLevel: minWinLevelForTier(tierIndex) }
+        const { state: nextMatch } = advanceTick(soccerModule, tier.match, tier.tickIndex, matchContext)
         const nextTickIndex = tier.tickIndex + 1
 
         // Direct per-tick Revenue: the primary generator, granted identically
@@ -217,9 +230,9 @@ export const useGameStore = create<GameState>()(
         const perTickRevenue = Math.round(tierPerTickRevenue(config, tier.level) * legacyMultiplier)
 
         if (isMatchComplete(soccerModule, nextTickIndex)) {
-          const { outcome, revenue: baseRevenue } = finalizeMatch(soccerModule, nextMatch)
+          const { outcome, revenue: baseRevenue } = finalizeMatch(soccerModule, nextMatch, matchContext)
           const completionBonus = Math.round(
-            baseRevenue * config.baseRevenueMultiplier * tier.level * legacyMultiplier,
+            baseRevenue * config.baseRevenueMultiplier * trainingEffectMultiplier(tier.level) * legacyMultiplier,
           )
           const totalEarned = perTickRevenue + completionBonus
 
@@ -304,7 +317,7 @@ export const useGameStore = create<GameState>()(
         if (tierIndex === -1) return
         const tier = tiers[tierIndex]
         if (!tier.unlocked) return
-        if (!isTierRevealed(tierIndex, legacy.hasPrestiged)) return
+        if (!isTierRevealed(tierIndex, legacy.prestigeCount)) return
         const cost = tierUpgradeCost(SOCCER_VENTURE_TIERS[tierIndex], tier.level)
         if (currencies.revenue < cost) return
 
@@ -323,7 +336,7 @@ export const useGameStore = create<GameState>()(
         if (tierIndex === -1) return
         const tier = tiers[tierIndex]
         if (!tier.unlocked || tier.managerHired) return
-        if (!isTierRevealed(tierIndex, legacy.hasPrestiged)) return
+        if (!isTierRevealed(tierIndex, legacy.prestigeCount)) return
         const cost = SOCCER_VENTURE_TIERS[tierIndex].managerHireCost
         if (currencies.revenue < cost) return
 
@@ -345,7 +358,7 @@ export const useGameStore = create<GameState>()(
         if (tierIndex === -1) return
         const tier = tiers[tierIndex]
         if (tier.unlocked) return
-        if (!isTierRevealed(tierIndex, legacy.hasPrestiged)) return
+        if (!isTierRevealed(tierIndex, legacy.prestigeCount)) return
         // Permanent "Veteran Discount" Legacy upgrade shrinks every unlock
         // cost (1 if never prestiged/purchased — no behavior change
         // pre-prestige).
@@ -415,15 +428,18 @@ export const useGameStore = create<GameState>()(
       },
 
       // Spends Legacy Points on one permanent upgrade. No-op if already
-      // maxed/owned or Legacy Points are insufficient — same defensive
-      // shape as every other purchase action above.
+      // owned (one-time toggles) or Legacy Points are insufficient — same
+      // defensive shape as every other purchase action above. Revenue
+      // Boost/Veteran Discount are uncapped (see prestige.ts): there is no
+      // maxLevel to check at all, only affordability — the cost formula
+      // itself (and, for Veteran Discount, its asymptotic discount curve)
+      // is what keeps indefinite leveling sensible.
       purchaseLegacyUpgrade: (upgradeId) => {
         const { legacy } = get()
         const levels = legacy.permanentUpgrades
 
         if (upgradeId === 'revenueBoost') {
           const nextLevel = levels.revenueBoostLevel + 1
-          if (nextLevel > PERMANENT_UPGRADES.revenueBoost.maxLevel) return
           const cost = PERMANENT_UPGRADES.revenueBoost.costForLevel(nextLevel)
           if (legacy.legacyPoints < cost) return
           set((s) => ({
@@ -466,7 +482,6 @@ export const useGameStore = create<GameState>()(
 
         if (upgradeId === 'veteranDiscount') {
           const nextLevel = levels.veteranDiscountLevel + 1
-          if (nextLevel > PERMANENT_UPGRADES.veteranDiscount.maxLevel) return
           const cost = PERMANENT_UPGRADES.veteranDiscount.costForLevel(nextLevel)
           if (legacy.legacyPoints < cost) return
           set((s) => ({
@@ -493,7 +508,8 @@ export const useGameStore = create<GameState>()(
       // existed) would silently REPLACE the freshly-initialized 11-entry
       // array wholesale, leaving `tiers` shorter than SOCCER_VENTURE_TIERS
       // for players who already have a save. If that shorter save also has
-      // hasPrestiged: true, the UI would try to render tiers whose state
+      // prestigeCount >= 1 (so revealedTierCount() slices past the
+      // persisted length), the UI would try to render tiers whose state
       // entry is `undefined` and crash. Pad any missing trailing entries
       // with fresh tier state (unlocked: false, matching a never-yet-seen
       // tier) instead of trusting the persisted length. Harmless/no-op for

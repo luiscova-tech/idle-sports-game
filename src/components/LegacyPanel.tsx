@@ -1,6 +1,11 @@
 import { useGameStore } from '../store/useGameStore'
-import { calculateLegacyPoints, PERMANENT_UPGRADES } from '../engine/prestige'
-import { SOCCER_VENTURE_TIERS, FIRST_PRESTIGE_TRIGGER_TIER_ID } from '../sports/soccer/soccerModule'
+import { calculateLegacyPoints, PERMANENT_UPGRADES, unlockCostMultiplier } from '../engine/prestige'
+import {
+  SOCCER_VENTURE_TIERS,
+  FIRST_PRESTIGE_TRIGGER_TIER_ID,
+  revealedTierCount,
+  MAX_POST_PRESTIGE_REVEALS,
+} from '../sports/soccer/soccerModule'
 import './LegacyPanel.css'
 
 const TRIGGER_TIER_NAME =
@@ -23,11 +28,32 @@ function LegacyPanel() {
   const totalEarnings = tiers.reduce((sum, t) => sum + t.cumulativeRevenue, 0)
   const previewGain = calculateLegacyPoints(totalEarnings)
 
+  // One additional hidden tier reveals per completed prestige (see
+  // revealedTierCount in soccerModule.ts) rather than all of tiers 7-11
+  // unlocking together on the first one — this copy reflects that directly,
+  // naming the specific next tier still to come rather than implying a
+  // single all-at-once unlock.
+  const revealedCount = revealedTierCount(legacy.prestigeCount)
+  const nextTierToReveal = SOCCER_VENTURE_TIERS[revealedCount]
+  // Counts what's left AFTER the reveal the NEXT prestige itself causes —
+  // legacy.prestigeCount hasn't incremented yet (that happens inside
+  // resetForLegacy), so this must look one prestige ahead of the current
+  // count, not use it as-is (an earlier version counted the about-to-be-
+  // revealed tier itself as still "remaining," off by one).
+  const postPrestigeRevealsRemainingAfterNext =
+    MAX_POST_PRESTIGE_REVEALS - Math.min(legacy.prestigeCount + 1, MAX_POST_PRESTIGE_REVEALS)
+
   const handleResetForLegacy = () => {
+    const revealNote = nextTierToReveal
+      ? ` It will also permanently reveal ${nextTierToReveal.name}.`
+      : ''
+    const trainingNote =
+      ' Every currently-unlocked tier\'s "Improve Training" level resets too, so wins at those tiers ' +
+      'may resolve as draws again until you retrain past their minimum win level.'
     const confirmed = window.confirm(
       `Reset for Legacy?\n\nThis wipes all Revenue and every tier's level/unlocks/matches back ` +
         `to a fresh ${SOCCER_VENTURE_TIERS[0].name} start. You will gain ${previewGain} Legacy Points, ` +
-        `which are kept permanently along with any Legacy upgrades you've bought. This cannot be undone.`,
+        `which are kept permanently along with any Legacy upgrades you've bought.${revealNote}${trainingNote} This cannot be undone.`,
     )
     if (confirmed) resetForLegacy()
   }
@@ -47,7 +73,9 @@ function LegacyPanel() {
       {!triggerTierUnlocked ? (
         <p className="legacy-panel__locked-note">
           Reach and unlock {TRIGGER_TIER_NAME} to unlock Reset for Legacy — a permanent prestige system
-          that trades this run's progress for Legacy Points and lasting upgrades.
+          that trades this run's progress for Legacy Points and lasting upgrades. Your first prestige
+          also reveals a hidden next tier beyond the ladder shown here — and each prestige after that
+          reveals one more, one at a time.
         </p>
       ) : (
         <div className="legacy-panel__reset-block">
@@ -55,6 +83,21 @@ function LegacyPanel() {
             Resetting for Legacy now would grant <strong>{previewGain} Legacy Points</strong> (based on{' '}
             {totalEarnings.toLocaleString()} total Revenue earned this run).
           </p>
+          {nextTierToReveal ? (
+            <p className="legacy-panel__reveal-note">
+              Prestiging again will permanently reveal <strong>{nextTierToReveal.name}</strong>
+              {postPrestigeRevealsRemainingAfterNext > 0
+                ? ` (${postPrestigeRevealsRemainingAfterNext} more tier${
+                    postPrestigeRevealsRemainingAfterNext > 1 ? 's' : ''
+                  } to reveal after that)`
+                : ''}
+              .
+            </p>
+          ) : (
+            <p className="legacy-panel__reveal-note">
+              Every tier is revealed. Prestiging further only earns more Legacy Points.
+            </p>
+          )}
           <button type="button" className="btn btn--legacy" onClick={handleResetForLegacy}>
             Reset for Legacy
           </button>
@@ -68,25 +111,19 @@ function LegacyPanel() {
           <div className="legacy-upgrade__info">
             <span className="legacy-upgrade__name">{PERMANENT_UPGRADES.revenueBoost.label}</span>
             <span className="legacy-upgrade__desc">{PERMANENT_UPGRADES.revenueBoost.description}</span>
-            <span className="legacy-upgrade__level">
-              Level {levels.revenueBoostLevel}/{PERMANENT_UPGRADES.revenueBoost.maxLevel}
-            </span>
+            <span className="legacy-upgrade__level">Level {levels.revenueBoostLevel} (no cap)</span>
           </div>
-          {levels.revenueBoostLevel >= PERMANENT_UPGRADES.revenueBoost.maxLevel ? (
-            <span className="legacy-upgrade__maxed">MAXED</span>
-          ) : (
-            <button
-              type="button"
-              className="btn btn--legacy-purchase"
-              onClick={() => purchaseLegacyUpgrade('revenueBoost')}
-              disabled={
-                legacy.legacyPoints <
-                PERMANENT_UPGRADES.revenueBoost.costForLevel(levels.revenueBoostLevel + 1)
-              }
-            >
-              Buy ({PERMANENT_UPGRADES.revenueBoost.costForLevel(levels.revenueBoostLevel + 1)} LP)
-            </button>
-          )}
+          <button
+            type="button"
+            className="btn btn--legacy-purchase"
+            onClick={() => purchaseLegacyUpgrade('revenueBoost')}
+            disabled={
+              legacy.legacyPoints <
+              PERMANENT_UPGRADES.revenueBoost.costForLevel(levels.revenueBoostLevel + 1)
+            }
+          >
+            Buy ({PERMANENT_UPGRADES.revenueBoost.costForLevel(levels.revenueBoostLevel + 1)} LP)
+          </button>
         </div>
 
         <div className="legacy-upgrade">
@@ -132,24 +169,21 @@ function LegacyPanel() {
             <span className="legacy-upgrade__name">{PERMANENT_UPGRADES.veteranDiscount.label}</span>
             <span className="legacy-upgrade__desc">{PERMANENT_UPGRADES.veteranDiscount.description}</span>
             <span className="legacy-upgrade__level">
-              Level {levels.veteranDiscountLevel}/{PERMANENT_UPGRADES.veteranDiscount.maxLevel}
+              Level {levels.veteranDiscountLevel} (no cap) —{' '}
+              {Math.round((1 - unlockCostMultiplier(levels)) * 100)}% off currently
             </span>
           </div>
-          {levels.veteranDiscountLevel >= PERMANENT_UPGRADES.veteranDiscount.maxLevel ? (
-            <span className="legacy-upgrade__maxed">MAXED</span>
-          ) : (
-            <button
-              type="button"
-              className="btn btn--legacy-purchase"
-              onClick={() => purchaseLegacyUpgrade('veteranDiscount')}
-              disabled={
-                legacy.legacyPoints <
-                PERMANENT_UPGRADES.veteranDiscount.costForLevel(levels.veteranDiscountLevel + 1)
-              }
-            >
-              Buy ({PERMANENT_UPGRADES.veteranDiscount.costForLevel(levels.veteranDiscountLevel + 1)} LP)
-            </button>
-          )}
+          <button
+            type="button"
+            className="btn btn--legacy-purchase"
+            onClick={() => purchaseLegacyUpgrade('veteranDiscount')}
+            disabled={
+              legacy.legacyPoints <
+              PERMANENT_UPGRADES.veteranDiscount.costForLevel(levels.veteranDiscountLevel + 1)
+            }
+          >
+            Buy ({PERMANENT_UPGRADES.veteranDiscount.costForLevel(levels.veteranDiscountLevel + 1)} LP)
+          </button>
         </div>
       </div>
     </section>

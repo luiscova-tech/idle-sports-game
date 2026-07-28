@@ -64,6 +64,16 @@
   color: var(--color-legacy);
 }
 
+.legacy-panel__reveal-note {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  margin: 0 0 var(--space-2);
+}
+
+.legacy-panel__reveal-note strong {
+  color: var(--color-legacy);
+}
+
 .btn--legacy {
   width: 100%;
   background: var(--color-legacy);

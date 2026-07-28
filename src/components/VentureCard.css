@@ -96,6 +96,12 @@
   color: var(--color-text);
 }
 
+.venture-card__min-win-note {
+  font-size: 0.78rem;
+  color: var(--color-warning);
+  margin: 0 0 var(--space-2);
+}
+
 .venture-card__stats {
   display: flex;
   flex-wrap: wrap;

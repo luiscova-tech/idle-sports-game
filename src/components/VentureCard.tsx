@@ -4,7 +4,10 @@ import {
   DEFAULT_SOCCER_CONFIG,
   tierUpgradeCost,
   tierPerTickRevenue,
+  trainingEffectMultiplier,
+  minWinLevelForTier,
   getOutcome,
+  getPerformanceFactor,
 } from '../sports/soccer/soccerModule'
 import { calculateMatchRevenue } from '../engine/economy'
 import { unlockCostMultiplier, globalRevenueMultiplier } from '../engine/prestige'
@@ -87,18 +90,26 @@ function VentureCard({ tierId }: VentureCardProps) {
 
   const upgradeCost = tierUpgradeCost(config, tier.level)
   const perTickRevenue = Math.round(tierPerTickRevenue(config, tier.level) * legacyRevenueMultiplier)
+  const minWinLevel = minWinLevelForTier(tierIndex)
+  const trainingTooLowToWin = tier.level < minWinLevel
 
   // Purely presentational: derived from state already in the store, using
-  // the exact same getOutcome()/calculateMatchRevenue() the engine uses at
-  // real match completion — never a separate formula that could drift.
-  // No store/economy logic changes; the actual payout still only lands
-  // when the match genuinely completes.
+  // the exact same getOutcome()/getPerformanceFactor()/calculateMatchRevenue()
+  // the engine uses at real match completion — including the same
+  // minWinLevel gating context — never a separate formula that could
+  // drift. No store/economy logic changes; the actual payout still only
+  // lands when the match genuinely completes.
   const progressPercent = Math.round(
     (tier.match.elapsedTicks / DEFAULT_SOCCER_CONFIG.ticksPerMatch) * 100,
   )
-  const projectedOutcome = getOutcome(tier.match)
+  const matchContext = { level: tier.level, minWinLevel }
+  const projectedOutcome = getOutcome(tier.match, matchContext)
+  const projectedPerformanceFactor = getPerformanceFactor(tier.match, matchContext)
   const projectedPayout = Math.round(
-    calculateMatchRevenue(projectedOutcome) * config.baseRevenueMultiplier * tier.level * legacyRevenueMultiplier,
+    calculateMatchRevenue(projectedOutcome, projectedPerformanceFactor) *
+      config.baseRevenueMultiplier *
+      trainingEffectMultiplier(tier.level) *
+      legacyRevenueMultiplier,
   )
 
   return (
@@ -132,6 +143,11 @@ function VentureCard({ tierId }: VentureCardProps) {
         If the match ended now: <strong>{OUTCOME_LABEL[projectedOutcome]}</strong>, +
         {projectedPayout} Revenue
       </p>
+      {trainingTooLowToWin && (
+        <p className="venture-card__min-win-note">
+          Training level below {minWinLevel} — wins resolve as draws until you train further.
+        </p>
+      )}
 
       <div className="venture-card__stats">
         <div className="venture-card__stat">
