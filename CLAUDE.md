@@ -35,7 +35,7 @@ Classic idle games hook players with manual interaction before automation is ear
 - Future sports should follow the same shape: a manual per-tick trigger wired to the same tick-resolution path, gated automation behind a purchasable unlock, no changes to `src/engine/**`.
 
 ### Venture tiers (second amendment to step 2 — Adventure-Capitalist-style restructuring)
-The single global match view was replaced with a vertical stack of independent "venture tier" cards (`Local Game → Local Tournament → Regional Championship → National League` for soccer), each its own parallel revenue generator:
+The single global match view was replaced with a vertical stack of independent "venture tier" cards (`Local Game → Local Tournament → Regional Championship → National League → Continental Cup → World Championship` for soccer — the last two added in the eighth amendment below), each its own parallel revenue generator:
 - **Reuse vs. divergence:** every tier runs its match through the exact same `createSoccerModule()` instance and the exact same `advanceTick`/`isMatchComplete`/`finalizeMatch` (`src/engine/tickEngine.ts`) and `calculateMatchRevenue` (`src/engine/economy.ts`) — none of those files changed. The only per-tier divergence is a revenue multiplier (`baseRevenueMultiplier × level`) applied in the store, in `tickTier()`, on top of `economy.ts`'s base win/draw/loss payout. `economy.ts` itself has no concept of tiers.
 - Tier names/multipliers/costs are sport-specific vocabulary, so they live in `src/sports/soccer/soccerModule.ts` (`SOCCER_VENTURE_TIERS`, `tierUpgradeCost()`) — the same file that owns "goal"/"chance"/etc. A second sport (step 3) defines its own tier list the same way.
 - **Store shape:** `useGameStore.ts` now holds `tiers: VentureTier[]` (id, unlocked, level, managerHired, tickIndex, match, matchesCompleted, cumulativeRevenue, lastOutcome) instead of one global match object, plus the store-level actions `tickTier`, `upgradeTier` ("Improve Training" — raises `level`, cost grows per level via a mild exponential curve), and `hireManagerForTier`.
@@ -80,6 +80,18 @@ Added a player-facing way to wipe their save without needing browser devtools, s
 - New store action `resetProgress()` in `useGameStore.ts`: sets `tiers` back to `createInitialTiers()` and `currencies` back to `{ revenue: 0 }`. The `persist` middleware picks up this `set()` the same as any other action, so it re-saves the fresh state to `localStorage` automatically — no separate storage-clearing code needed.
 - UI: a small muted "Reset Progress" button in the page header (`Home.tsx`/`App.css`, `.app-header__reset`), styled to recede visually (thin outline, muted text, turns red-ish only on hover) rather than compete with the primary Revenue display. Guarded by a native `window.confirm()` before calling `resetProgress()` — cheap, no new dependency, prevents an accidental misclick from wiping progress.
 - Verified: reset correctly zeroes all tiers/currencies and rewrites the `localStorage` entry; canceling the confirm dialog leaves progress untouched.
+
+### Ladder extended to 6 tiers (eighth amendment to step 2 — mechanical extension, not a new balance pass)
+Added tiers 5-6 (`Continental Cup`, `World Championship`) to `SOCCER_VENTURE_TIERS`, continuing the exact curve established for tiers 1-4 — no new mechanics, no changes outside the config array itself.
+- **Confirmed the pattern is genuinely config-driven:** `git diff --stat` showed only `soccerModule.ts` changed. `Home.tsx`, `VentureCard.tsx`, `useGameStore.ts`, and `useMatchTicker.ts` all iterate/index generically over `SOCCER_VENTURE_TIERS` with no hardcoded tier count anywhere (verified by grep before making the change) — the 6-card UI, independent per-tier state, and unlock/upgrade/manager purchases all worked with zero code changes beyond the two new config entries.
+- **Numbers chosen (mechanical continuation, not a new decision):**
+  - `unlockCost`: continues the exact 5x/5x ladder — 11250 → **56250** → **281250**.
+  - `managerHireCost`: also continued at exactly 5x (its tier 1-4 ratios were 3.33x/5x/4.8x, already trending toward 5x) — 12000 → **60000** → **300000**.
+  - `upgradeBaseCost`: continued at ~4.2x (tier 1-4 ratios were 3x/4x/4.17x, trending toward ~4.2x) — 5000 → **21000** → **88200**.
+  - `upgradeCostGrowth`: continued the +0.05-per-tier pattern (1.6, 1.6, 1.65, 1.7) — → **1.75** → **1.8**.
+  - `baseRevenueMultiplier`: continued the gently-decreasing ratio sequence (4x, 3x, 2.917x) — 35 → **100** (2.857x) → **280** (2.8x). Slightly below the "~3-4x" characterization for tier 6, but this is the faithful continuation of the already-decreasing trend, not a deviation from it.
+- Tiers 7-11 and prestige are explicitly out of scope for this session, per instruction — not referenced or scaffolded anywhere.
+- Verified: build/lint clean; all 6 cards render correctly (screenshot-checked); unlocked Local Tournament live to confirm a newly-added-pattern-tier's neighbors (Regional Championship through World Championship) still correctly track the shared Revenue balance with no chain dependency on any specific prior tier.
 
 ## Build Order (current status — update the checkboxes as work completes)
 - [x] 1. Scaffold React/Vite + Zustand, basic layout, empty store

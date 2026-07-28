@@ -161,6 +161,24 @@ export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
     upgradeBaseCost: 5000,
     upgradeCostGrowth: 1.7,
   },
+  {
+    id: 'continental-cup',
+    name: 'Continental Cup',
+    baseRevenueMultiplier: 100,
+    unlockCost: 56250,
+    managerHireCost: 60000,
+    upgradeBaseCost: 21000,
+    upgradeCostGrowth: 1.75,
+  },
+  {
+    id: 'world-championship',
+    name: 'World Championship',
+    baseRevenueMultiplier: 280,
+    unlockCost: 281250,
+    managerHireCost: 300000,
+    upgradeBaseCost: 88200,
+    upgradeCostGrowth: 1.8,
+  },
 ]
 
 /** Revenue cost to raise a tier currently at `currentLevel` to the next level. */
