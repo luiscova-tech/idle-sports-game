@@ -3,6 +3,7 @@ import { useMatchTicker } from '../hooks/useMatchTicker'
 import { SOCCER_VENTURE_TIERS, TIERS_REVEALED_BEFORE_PRESTIGE } from '../sports/soccer/soccerModule'
 import VentureCard from '../components/VentureCard'
 import LegacyPanel from '../components/LegacyPanel'
+import AchievementsPanel from '../components/AchievementsPanel'
 
 function Home() {
   const isInitialized = useGameStore((state) => state.isInitialized)
@@ -51,6 +52,7 @@ function Home() {
       </header>
 
       <LegacyPanel />
+      <AchievementsPanel />
 
       <div className="venture-list">
         {visibleTiers.map((config) => (

@@ -12,6 +12,7 @@ import {
   PERMANENT_UPGRADES,
   type PermanentUpgradeLevels,
 } from '../engine/prestige'
+import { checkNewlyEarnedAchievements, assertNeverRewardType } from '../engine/achievements'
 import {
   createSoccerModule,
   type SoccerMatchState,
@@ -89,11 +90,80 @@ function createInitialLegacy(): LegacyState {
   }
 }
 
+/** Stats tracked for the lifetime of a save, feeding the achievement
+ *  framework — never reset by resetForLegacy() (achievements are lifetime
+ *  accomplishments, not per-run stats, same persistence semantics as
+ *  `legacy` above), only by the full resetProgress() wipe. A future
+ *  achievement line (total Revenue earned, matches played, ...) adds a
+ *  sibling field here plus its own increment site, alongside its config
+ *  entries in `src/engine/achievements.ts`. */
+export interface LifetimeStats {
+  totalWins: number
+}
+
+function createInitialLifetimeStats(): LifetimeStats {
+  return { totalWins: 0 }
+}
+
+/** Which achievement ids (from `src/engine/achievements.ts`'s ACHIEVEMENTS)
+ *  have been earned — flat across every achievement line, since ids are
+ *  globally unique. Same lifetime persistence as LifetimeStats above. */
+export interface AchievementsState {
+  earnedIds: string[]
+}
+
+function createInitialAchievements(): AchievementsState {
+  return { earnedIds: [] }
+}
+
+/** Checks and grants any achievements that newly qualify given the current
+ *  value of every tracked lifetime stat, applying rewards atomically.
+ *  Deliberately called from BOTH of tickTier()'s branches below (not just
+ *  match-completion) — a future achievement line tracking a stat that
+ *  changes on every tick (e.g. total Revenue earned) needs this check to
+ *  run on every tick too, or it would sit unrecognized until the next
+ *  match happens to complete. `baseRevenue`/`baseLegacyPoints` are the
+ *  caller's already-computed values for this tick (e.g. after adding this
+ *  tick's own Revenue) — achievement rewards stack on top of those, never
+ *  replace them. A no-op (same `earnedIds`, unchanged totals) whenever
+ *  nothing newly qualifies, which is the overwhelmingly common case on any
+ *  given tick. */
+function applyEarnedAchievements(
+  stats: Record<string, number>,
+  earnedIds: readonly string[],
+  baseRevenue: number,
+  baseLegacyPoints: number,
+): { earnedIds: string[]; revenue: number; legacyPoints: number; grantedCount: number } {
+  const newlyEarned = checkNewlyEarnedAchievements(stats, earnedIds)
+  let revenue = baseRevenue
+  let legacyPoints = baseLegacyPoints
+  for (const achievement of newlyEarned) {
+    switch (achievement.reward.type) {
+      case 'revenue':
+        revenue += achievement.reward.amount
+        break
+      case 'legacyPoints':
+        legacyPoints += achievement.reward.amount
+        break
+      default:
+        assertNeverRewardType(achievement.reward.type)
+    }
+  }
+  return {
+    earnedIds: newlyEarned.length ? [...earnedIds, ...newlyEarned.map((a) => a.id)] : [...earnedIds],
+    revenue,
+    legacyPoints,
+    grantedCount: newlyEarned.length,
+  }
+}
+
 interface GameState {
   isInitialized: boolean
   tiers: VentureTier[]
   currencies: { revenue: number }
   legacy: LegacyState
+  lifetimeStats: LifetimeStats
+  achievements: AchievementsState
   tickTier: (tierId: string) => void
   upgradeTier: (tierId: string) => void
   hireManagerForTier: (tierId: string) => void
@@ -114,6 +184,8 @@ export const useGameStore = create<GameState>()(
       tiers: createInitialTiers(createInitialLegacy().permanentUpgrades),
       currencies: { revenue: startingRevenue(createInitialLegacy().permanentUpgrades) },
       legacy: createInitialLegacy(),
+      lifetimeStats: createInitialLifetimeStats(),
+      achievements: createInitialAchievements(),
 
       // Advances one tier's match by exactly one tick, via the same
       // engine/economy path whether it's called from the idle interval
@@ -164,9 +236,27 @@ export const useGameStore = create<GameState>()(
                   }
                 : t,
             )
+
+            // Lifetime win count (across every tier combined) feeds the
+            // achievement framework — see LifetimeStats above. Checked and
+            // granted atomically in this same set() (via the shared
+            // applyEarnedAchievements() helper, also called from the
+            // non-completion branch below) so the UI never renders a frame
+            // where the reward landed but the badge hasn't, or vice versa.
+            const totalWins = s.lifetimeStats.totalWins + (outcome === 'win' ? 1 : 0)
+            const granted = applyEarnedAchievements(
+              { totalWins },
+              s.achievements.earnedIds,
+              s.currencies.revenue + totalEarned,
+              s.legacy.legacyPoints,
+            )
+
             return {
               tiers: updatedTiers,
-              currencies: { revenue: s.currencies.revenue + totalEarned },
+              currencies: { revenue: granted.revenue },
+              lifetimeStats: { ...s.lifetimeStats, totalWins },
+              achievements: granted.grantedCount ? { earnedIds: granted.earnedIds } : s.achievements,
+              legacy: granted.grantedCount ? { ...s.legacy, legacyPoints: granted.legacyPoints } : s.legacy,
             }
           })
         } else {
@@ -181,9 +271,26 @@ export const useGameStore = create<GameState>()(
                   }
                 : t,
             )
+
+            // No tracked stat currently changes on a non-completion tick
+            // (totalWins only changes at match completion, above), so this
+            // check is a no-op today — but it runs symmetrically with the
+            // completion branch on purpose, so a FUTURE achievement line
+            // tracking a stat that changes every tick (e.g. total Revenue
+            // earned) gets caught the moment it crosses a threshold, not
+            // just whenever a match next happens to complete.
+            const granted = applyEarnedAchievements(
+              { totalWins: s.lifetimeStats.totalWins },
+              s.achievements.earnedIds,
+              s.currencies.revenue + perTickRevenue,
+              s.legacy.legacyPoints,
+            )
+
             return {
               tiers: updatedTiers,
-              currencies: { revenue: s.currencies.revenue + perTickRevenue },
+              currencies: { revenue: granted.revenue },
+              achievements: granted.grantedCount ? { earnedIds: granted.earnedIds } : s.achievements,
+              legacy: granted.grantedCount ? { ...s.legacy, legacyPoints: granted.legacyPoints } : s.legacy,
             }
           })
         }
@@ -265,6 +372,8 @@ export const useGameStore = create<GameState>()(
           tiers: createInitialTiers(freshLegacy.permanentUpgrades),
           currencies: { revenue: startingRevenue(freshLegacy.permanentUpgrades) },
           legacy: freshLegacy,
+          lifetimeStats: createInitialLifetimeStats(),
+          achievements: createInitialAchievements(),
         })
       },
 
@@ -376,6 +485,8 @@ export const useGameStore = create<GameState>()(
         tiers: state.tiers,
         currencies: state.currencies,
         legacy: state.legacy,
+        lifetimeStats: state.lifetimeStats,
+        achievements: state.achievements,
       }),
       // Save-migration fix: zustand's default merge does a shallow spread,
       // so a persisted `tiers` array (from a save made before tiers 7-11

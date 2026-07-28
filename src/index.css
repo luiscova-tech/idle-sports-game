@@ -36,6 +36,27 @@
   --color-legacy-bg: #f5f0fe;
   --color-legacy-border: #d9c8fb;
   --color-legacy-accent: #b8860b;
+
+  /* Achievements/badges system — a third distinct hue family (cyan) from
+     both the tier cards (blue/green/amber) and Legacy (purple/gold), so it
+     reads as its own system at a glance. Cyan rather than a green-leaning
+     teal on purpose: an earlier teal (~175°) sat only ~19° from
+     --color-success (~155°) — too close to read as clearly distinct at a
+     glance — so this is shifted further toward blue (~190°) for a safe
+     margin. Individual badge tiers use their own conventional
+     bronze/silver/gold swatches within that container; silver is a cool
+     steel-blue rather than plain gray so it doesn't collide with
+     --color-text-muted's own blue-gray. */
+  --color-achievement: #0891b2;
+  --color-achievement-hover: #0e7490;
+  --color-achievement-bg: #ecfeff;
+  --color-achievement-border: #a5f3fc;
+  --color-badge-bronze: #b45309;
+  --color-badge-bronze-bg: #fef3e2;
+  --color-badge-silver: #7c93b8;
+  --color-badge-silver-bg: #f1f5f9;
+  --color-badge-gold: #a16207;
+  --color-badge-gold-bg: #fef9e7;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -62,6 +83,17 @@
     --color-legacy-bg: #211a35;
     --color-legacy-border: #4c3a7d;
     --color-legacy-accent: #e0b84c;
+
+    --color-achievement: #22d3ee;
+    --color-achievement-hover: #67e8f9;
+    --color-achievement-bg: #082f36;
+    --color-achievement-border: #155e75;
+    --color-badge-bronze: #e0a45c;
+    --color-badge-bronze-bg: #2c1f10;
+    --color-badge-silver: #a8c0e0;
+    --color-badge-silver-bg: #232833;
+    --color-badge-gold: #f0c94c;
+    --color-badge-gold-bg: #2e2610;
   }
 }
 

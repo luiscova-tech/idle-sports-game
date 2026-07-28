@@ -1,0 +1,158 @@
+.achievements-panel {
+  background: var(--color-achievement-bg);
+  border: 1px solid var(--color-achievement-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  box-shadow: var(--shadow-card);
+  margin-bottom: var(--space-4);
+}
+
+.achievements-panel__title {
+  font-size: 1.125rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0 0 var(--space-3);
+  color: var(--color-achievement);
+}
+
+.achievement-line {
+  margin-bottom: var(--space-3);
+}
+
+.achievement-line:last-child {
+  margin-bottom: 0;
+}
+
+.achievement-line__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1);
+}
+
+.achievement-line__label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted);
+}
+
+.achievement-line__value {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.achievement-line__progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-muted-surface);
+  overflow: hidden;
+  margin-bottom: var(--space-2);
+}
+
+.achievement-line__progress-fill {
+  height: 100%;
+  background: var(--color-achievement);
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+
+.achievement-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.achievement-badge {
+  flex: 1 1 130px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  position: relative;
+}
+
+.achievement-badge--locked {
+  opacity: 0.55;
+}
+
+.achievement-badge--bronze.achievement-badge--earned {
+  background: var(--color-badge-bronze-bg);
+  border-color: var(--color-badge-bronze);
+}
+
+.achievement-badge--silver.achievement-badge--earned {
+  background: var(--color-badge-silver-bg);
+  border-color: var(--color-badge-silver);
+}
+
+.achievement-badge--gold.achievement-badge--earned {
+  background: var(--color-badge-gold-bg);
+  border-color: var(--color-badge-gold);
+}
+
+/* Fallback for any tier beyond Bronze/Silver/Gold (the `tier` field is a
+   plain string, not a closed union, specifically so a new tier name needs
+   no code change here to render sensibly) — reuses the panel's own teal
+   accent rather than looking unstyled. */
+.achievement-badge--other.achievement-badge--earned {
+  background: var(--color-achievement-bg);
+  border-color: var(--color-achievement);
+}
+
+.achievement-badge--other .achievement-badge__tier {
+  color: var(--color-achievement);
+}
+
+.achievement-badge__tier {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+}
+
+.achievement-badge--bronze .achievement-badge__tier {
+  color: var(--color-badge-bronze);
+}
+
+.achievement-badge--silver .achievement-badge__tier {
+  color: var(--color-badge-silver);
+}
+
+.achievement-badge--gold .achievement-badge__tier {
+  color: var(--color-badge-gold);
+}
+
+.achievement-badge__name {
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.achievement-badge__threshold {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+}
+
+.achievement-badge__reward {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--color-achievement);
+}
+
+.achievement-badge__check {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  font-weight: 700;
+  font-size: 0.8rem;
+  color: var(--color-success);
+}
