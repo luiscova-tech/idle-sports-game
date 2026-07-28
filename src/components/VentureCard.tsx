@@ -5,7 +5,8 @@ import {
   tierUpgradeCost,
   tierPerTickRevenue,
   trainingEffectMultiplier,
-  minWinLevelForTier,
+  nextMilestoneLevel,
+  previousMilestoneLevel,
   getOutcome,
   getPerformanceFactor,
 } from '../sports/soccer/soccerModule'
@@ -90,21 +91,33 @@ function VentureCard({ tierId }: VentureCardProps) {
 
   const upgradeCost = tierUpgradeCost(config, tier.level)
   const perTickRevenue = Math.round(tierPerTickRevenue(config, tier.level) * legacyRevenueMultiplier)
-  const minWinLevel = minWinLevelForTier(tierIndex)
-  const trainingTooLowToWin = tier.level < minWinLevel
+  const nextMilestone = nextMilestoneLevel(tier.level)
+  // Progress SINCE the previous milestone (or level 1, if none crossed
+  // yet) — not raw level over the next target. The latter looks right only
+  // for the very first milestone; for every one after that it's misleadingly
+  // pre-filled the instant the previous milestone is crossed (e.g. landing
+  // on level 13 would read as 59% of the way to 22, despite zero training
+  // purchased since the crossing that just happened).
+  const previousMilestone = previousMilestoneLevel(tier.level)
+  const milestoneProgressPercent = nextMilestone
+    ? Math.min(
+        100,
+        Math.round(((tier.level - previousMilestone) / (nextMilestone - previousMilestone)) * 100),
+      )
+    : 100
 
   // Purely presentational: derived from state already in the store, using
   // the exact same getOutcome()/getPerformanceFactor()/calculateMatchRevenue()
-  // the engine uses at real match completion — including the same
-  // minWinLevel gating context — never a separate formula that could
-  // drift. No store/economy logic changes; the actual payout still only
-  // lands when the match genuinely completes.
+  // the engine uses at real match completion — never a separate formula
+  // that could drift. Once this match's first tick has run, its outcome is
+  // already resolved (see soccerModule.ts's resolveMatchOutcome) and these
+  // two calls just read that back out — no store/economy logic changes; the
+  // actual payout still only lands when the match genuinely completes.
   const progressPercent = Math.round(
     (tier.match.elapsedTicks / DEFAULT_SOCCER_CONFIG.ticksPerMatch) * 100,
   )
-  const matchContext = { level: tier.level, minWinLevel }
-  const projectedOutcome = getOutcome(tier.match, matchContext)
-  const projectedPerformanceFactor = getPerformanceFactor(tier.match, matchContext)
+  const projectedOutcome = getOutcome(tier.match)
+  const projectedPerformanceFactor = getPerformanceFactor(tier.match)
   const projectedPayout = Math.round(
     calculateMatchRevenue(projectedOutcome, projectedPerformanceFactor) *
       config.baseRevenueMultiplier *
@@ -143,10 +156,8 @@ function VentureCard({ tierId }: VentureCardProps) {
         If the match ended now: <strong>{OUTCOME_LABEL[projectedOutcome]}</strong>, +
         {projectedPayout} Revenue
       </p>
-      {trainingTooLowToWin && (
-        <p className="venture-card__min-win-note">
-          Training level below {minWinLevel} — wins resolve as draws until you train further.
-        </p>
+      {tier.match.opponentLevel !== undefined && (
+        <p className="venture-card__opponent-note">Facing a Level {tier.match.opponentLevel} opponent</p>
       )}
 
       <div className="venture-card__stats">
@@ -178,6 +189,19 @@ function VentureCard({ tierId }: VentureCardProps) {
         >
           Improve Training ({Math.min(revenue, upgradeCost)}/{upgradeCost} Revenue)
         </button>
+        {nextMilestone && (
+          <div className="venture-card__milestone">
+            <span className="venture-card__milestone-label">
+              Next: training 2x at Level {nextMilestone} ({tier.level}/{nextMilestone})
+            </span>
+            <div className="venture-card__milestone-track">
+              <div
+                className="venture-card__milestone-fill"
+                style={{ width: `${milestoneProgressPercent}%` }}
+              />
+            </div>
+          </div>
+        )}
 
         {tier.managerHired ? (
           <p className="venture-card__auto-note">Manager hired — auto-advancing.</p>

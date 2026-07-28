@@ -96,10 +96,36 @@
   color: var(--color-text);
 }
 
-.venture-card__min-win-note {
+.venture-card__opponent-note {
   font-size: 0.78rem;
-  color: var(--color-warning);
+  color: var(--color-text-muted);
   margin: 0 0 var(--space-2);
+}
+
+.venture-card__milestone {
+  margin: 0 0 var(--space-1);
+}
+
+.venture-card__milestone-label {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  text-align: center;
+  margin-bottom: 3px;
+}
+
+.venture-card__milestone-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--color-muted-surface);
+  overflow: hidden;
+}
+
+.venture-card__milestone-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--color-primary);
+  transition: width 0.3s ease;
 }
 
 .venture-card__stats {

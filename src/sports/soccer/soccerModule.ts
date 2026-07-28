@@ -6,11 +6,25 @@
 
 import type { SportModule, TickResult, MatchOutcome, MatchContext } from '../../engine/types'
 
-/** Soccer's opaque per-match state, as seen by the engine. */
+/** Soccer's opaque per-match state, as seen by the engine.
+ *
+ *  `opponentLevel`/`resolvedOutcome` are set ONCE, on this match's very
+ *  first tick (see `tick()` below), and then carried through unchanged for
+ *  the rest of the match — deciding a match's outcome via one early
+ *  probability roll and then re-reading it (rather than re-deriving it from
+ *  score on every call) is what keeps getOutcome()/getPerformanceFactor()
+ *  pure, idempotent functions of state: the live "if the match ended now"
+ *  UI preview calls them repeatedly as a match progresses, and must never
+ *  re-roll a different answer on every render. Both are `undefined` before
+ *  the first tick, and stay `undefined` for the match's whole duration if
+ *  no `context.opponentLevelRange` was ever supplied (the "no such concept"
+ *  fallback — see MatchContext in engine/types.ts). */
 export interface SoccerMatchState {
   homeScore: number
   awayScore: number
   elapsedTicks: number
+  opponentLevel?: number
+  resolvedOutcome?: MatchOutcome
 }
 
 /** Tunable soccer-specific rates. Widening this later with stat-driven
@@ -39,27 +53,115 @@ function createInitialState(): SoccerMatchState {
   return { homeScore: 0, awayScore: 0, elapsedTicks: 0 }
 }
 
+/**
+ * Continuous, opponent-level-based win probability — supersedes the earlier
+ * hard "minimum training level to win" cliff entirely (see CLAUDE.md). Both
+ * constants are used LITERALLY (not as an emergent approximation from
+ * modulated per-tick rates — an earlier draft tried that and found it
+ * fragile: compounding a per-tick bias over 90 independent ticks amplifies
+ * it far past the intended per-match sensitivity, and hitting a precise
+ * target curve that way required constant-hunting with no clean closed
+ * form). Instead, the outcome is resolved by ONE direct roll against this
+ * exact formula, once per match (see `tick()` below) — S=4 exactly
+ * reproduces the validated anchor point (a 3-level gap -> ~15.1% win
+ * chance) by construction, not by simulation-fitting.
+ */
+const GAP_PROBABILITY_SCALE = 4
+
+/**
+ * How much of the non-win probability mass becomes a draw (the rest is a
+ * loss), as a fraction of `closeness * (1 - pWin)`, where `closeness =
+ * 4 * pWin * (1 - pWin)` peaks at 1 when the match is dead-even (pWin=0.5)
+ * and tapers to 0 at extreme mismatches — real sports draws are commonest
+ * in close matchups and rare in blowouts, in either direction. This is
+ * "your call" territory (the brief only pins down P(win) itself): 0.5 gives
+ * a 25%/25% draw/loss split at a perfectly even matchup (close to the old
+ * flat model's ~20% draw rate) tapering smoothly to near-0% draws at large
+ * mismatches, matched against pWin/pLoss via simulation (see CLAUDE.md).
+ * Chosen so pDraw can mathematically never exceed `1 - pWin`, at any pWin —
+ * no clamping needed, safe by construction. */
+const DRAW_WEIGHT = 0.5
+
+/** Draws this match's opponent level from `range` and resolves the outcome
+ *  via the gap-driven probability model above, in one shot. Called exactly
+ *  once per match (at its first tick — see `tick()`), never re-rolled. */
+function resolveMatchOutcome(playerLevel: number, opponentLevel: number): MatchOutcome {
+  const gap = opponentLevel - playerLevel
+  const pWin = 1 / (1 + 10 ** (gap / GAP_PROBABILITY_SCALE))
+  const closeness = 4 * pWin * (1 - pWin)
+  const pDraw = DRAW_WEIGHT * closeness * (1 - pWin)
+  const roll = Math.random()
+  if (roll < pWin) return 'win'
+  if (roll < pWin + pDraw) return 'draw'
+  return 'loss'
+}
+
 function tick(
   state: SoccerMatchState,
   tickIndex: number,
   config: SoccerConfig,
+  context?: MatchContext,
 ): TickResult<SoccerMatchState> {
-  let { homeScore, awayScore } = state
+  let { homeScore, awayScore, opponentLevel, resolvedOutcome } = state
   let scoringEvent = false
 
-  // Home side: does a scoring chance occur this tick, and is it converted?
+  // First tick of a fresh match: draw this match's opponent level and
+  // resolve its outcome, once, up front — see resolveMatchOutcome above and
+  // the SoccerMatchState doc comment for why this must happen exactly once
+  // rather than being re-derived on every getOutcome()/getPerformanceFactor()
+  // call. A module with no opponentLevelRange in context (or no context at
+  // all) leaves both fields undefined for the whole match — the "no such
+  // concept" fallback, matching every other optional-capability rule here.
+  //
+  // Gated on `tickIndex === 0`, not just `resolvedOutcome === undefined` —
+  // deliberately, to protect a save persisted from BEFORE this field
+  // existed: a tier that was mid-match (tickIndex > 0) under the old
+  // SoccerMatchState shape has no `resolvedOutcome` key at all after
+  // JSON-parsing from localStorage, which would otherwise look identical to
+  // "this match's first tick" and trigger a fresh, disconnected-from-the-
+  // score resolution partway through — then the final-tick nudge below
+  // would rewrite whatever lead the player had already built up to match
+  // it. Requiring tickIndex===0 means such a match instead simply never
+  // resolves for the rest of ITS lifetime (resolvedOutcome stays undefined
+  // all the way to completion), so getOutcome() falls back to comparing its
+  // real final score — exactly the pre-this-session behavior — and only
+  // the NEXT match (starting fresh at tickIndex 0) uses the new model.
+  if (tickIndex === 0 && resolvedOutcome === undefined && context?.opponentLevelRange) {
+    const { min, max } = context.opponentLevelRange
+    opponentLevel = min + Math.floor(Math.random() * (max - min + 1))
+    resolvedOutcome = resolveMatchOutcome(context.level ?? 1, opponentLevel)
+  }
+
+  // Home/away scoring stays the same chance-then-conversion shape as
+  // before, but is now purely decorative match "flavor" (the live score
+  // ticker, progress bar) — level/opponent no longer bias it. The outcome
+  // that actually pays out is decided above, not by comparing these scores.
   if (Math.random() < config.homeChancePerTick) {
     if (Math.random() < config.homeConversionRate) {
       homeScore += 1
       scoringEvent = true
     }
   }
-
-  // Away side: independent roll, same two-stage chance-then-conversion shape.
   if (Math.random() < config.awayChancePerTick) {
     if (Math.random() < config.awayConversionRate) {
       awayScore += 1
       scoringEvent = true
+    }
+  }
+
+  // On the final tick, nudge the flavor score (minimally, only if needed)
+  // so it agrees with the already-resolved outcome by the time the match
+  // completes — the two systems are independent for 89 ticks, but should
+  // never disagree at the moment a match actually pays out.
+  if (tickIndex === config.ticksPerMatch - 1 && resolvedOutcome !== undefined) {
+    if (resolvedOutcome === 'win' && homeScore <= awayScore) {
+      homeScore = awayScore + 1
+    } else if (resolvedOutcome === 'loss' && awayScore <= homeScore) {
+      awayScore = homeScore + 1
+    } else if (resolvedOutcome === 'draw' && homeScore !== awayScore) {
+      const higher = Math.max(homeScore, awayScore)
+      homeScore = higher
+      awayScore = higher
     }
   }
 
@@ -68,6 +170,8 @@ function tick(
       homeScore,
       awayScore,
       elapsedTicks: tickIndex + 1,
+      opponentLevel,
+      resolvedOutcome,
     },
     scoringEvent,
   }
@@ -79,35 +183,57 @@ function rawOutcomeOf(state: SoccerMatchState): MatchOutcome {
   return 'loss'
 }
 
-/** Whether the raw outcome is a 'win' that context's minWinLevel gates
- *  away. Shared by getOutcome AND getPerformanceFactor below — they MUST
- *  agree on this, since a caller (economy.ts's calculateMatchRevenue) pairs
- *  up whatever the two return. An earlier version of this file computed the
- *  downgrade only inside getOutcome and left getPerformanceFactor reading
- *  the raw score unconditionally: a downgraded win (label 'draw') still
- *  reported its real, non-neutral goal-differential factor, so economy.ts's
- *  margin bonus — which is only ever supposed to apply to a genuine
- *  decisive win — leaked a bonus into what was actually paid out as a
- *  'draw'. Computing the gate once and feeding both functions from it makes
- *  that drift structurally impossible. */
-function isGatedWin(rawOutcome: MatchOutcome, context?: MatchContext): boolean {
-  return rawOutcome === 'win' && context?.minWinLevel !== undefined && (context.level ?? 0) < context.minWinLevel
+/**
+ * The single source of truth both getOutcome() and getPerformanceFactor()
+ * read from — sharing this is what keeps them structurally unable to drift
+ * apart (see the doc comment on SportModule.getPerformanceFactor in
+ * engine/types.ts: an earlier version of this file computed a downgrade
+ * only inside getOutcome and left getPerformanceFactor reading the raw
+ * score unconditionally, letting a margin bonus leak into an outcome it was
+ * never meant to apply to). Prefers `state.resolvedOutcome` (the
+ * probability-model result, set once at the match's first tick) when
+ * present; falls back to comparing the raw score when it's absent (no
+ * `context.opponentLevelRange` was ever supplied for this match — the
+ * "no such concept" case, or a freshly-created match state before its
+ * first tick has run).
+ */
+function resolvedOutcomeOf(state: SoccerMatchState): MatchOutcome {
+  return state.resolvedOutcome ?? rawOutcomeOf(state)
+}
+
+/**
+ * The goal differential to report for margin-bonus purposes, GUARANTEED
+ * consistent in sign with resolvedOutcomeOf() for the same state — even
+ * mid-match, before the final-tick nudge in tick() above has had a chance
+ * to actually align the flavor score with the resolved outcome. Without
+ * this, a mid-match live preview could show e.g. "LOSS" (from
+ * resolvedOutcome) while the flavor score currently happens to have home
+ * ahead by chance, and a naive differential would report a decisive-WIN-
+ * shaped factor for a match that's actually paying out as a loss — the
+ * exact bonus-leak bug shape from last session, reopened via a new gap.
+ * When the raw differential's sign already agrees with resolvedOutcome (the
+ * overwhelmingly common case, and always true once the final-tick nudge has
+ * run), this returns it unchanged. */
+function resolvedDifferential(state: SoccerMatchState): number {
+  const raw = state.homeScore - state.awayScore
+  if (state.resolvedOutcome === undefined) return raw
+  if (state.resolvedOutcome === 'win' && raw <= 0) return 1
+  if (state.resolvedOutcome === 'loss' && raw >= 0) return -1
+  if (state.resolvedOutcome === 'draw' && raw !== 0) return 0
+  return raw
 }
 
 /** Exported so UI can derive a live "if the match ended now" projected
  *  outcome from mid-match state, reusing the exact same logic the engine
- *  uses at actual match completion — never duplicated in a component.
- *
- *  `context` (optional — see MatchContext in engine/types.ts) supports the
- *  "minimum training level to win" mechanic: if the caller supplies
- *  `minWinLevel` and the current `level` falls short of it, a would-be win
- *  is downgraded to a draw — "trained enough to not lose, not enough to
- *  close it out." A raw draw/loss is never affected either way. Omitting
- *  context entirely (undefined) applies no gating at all, matching every
- *  other optional-capability rule in this codebase. */
-export function getOutcome(state: SoccerMatchState, context?: MatchContext): MatchOutcome {
-  const rawOutcome = rawOutcomeOf(state)
-  return isGatedWin(rawOutcome, context) ? 'draw' : rawOutcome
+ *  uses at actual match completion — never duplicated in a component. Once
+ *  a match's first tick has run, this is no longer really a "projection" of
+ *  a still-changing score (the outcome was already decided up front) — it's
+ *  a truthful early reveal of a result that won't change, which the
+ *  existing "if the match ended now" phrasing still holds up under: it was
+ *  always answering "what does the current state resolve to," and the
+ *  answer just happens to now be fixed from the first tick on. */
+export function getOutcome(state: SoccerMatchState): MatchOutcome {
+  return resolvedOutcomeOf(state)
 }
 
 /** The most meaningful goal differential for margin-bonus purposes — beyond
@@ -121,21 +247,11 @@ const MAX_MEANINGFUL_GOAL_DIFFERENTIAL = 5
 /** Exported for the same drift-proof-preview reason as getOutcome above:
  *  economy.ts's margin bonus (see calculateMatchRevenue) only ever consumes
  *  this generic 0-1 number — 0 = most lopsided possible loss, 0.5 = neutral
- *  (any draw, regardless of score, sits exactly here since its differential
- *  is 0 by definition), 1 = most decisive possible win. Linear in the
- *  differential between the two clamped extremes.
- *
- *  `context` MUST be the same object passed to getOutcome() for the same
- *  state (see isGatedWin above) — when getOutcome would downgrade a win to
- *  a draw, this returns exactly 0.5 (neutral), the same factor a genuine
- *  draw reports, regardless of the real score. Without that, a downgraded
- *  win's real (non-neutral) differential would still feed economy.ts's
- *  margin bonus even though it's being paid out as a flat 'draw'. */
-export function getPerformanceFactor(state: SoccerMatchState, context?: MatchContext): number {
-  const rawOutcome = rawOutcomeOf(state)
-  if (isGatedWin(rawOutcome, context)) return 0.5
-
-  const diff = state.homeScore - state.awayScore
+ *  (any draw sits exactly here), 1 = most decisive possible win. Linear in
+ *  the (resolved-consistent — see resolvedDifferential above) differential
+ *  between the two clamped extremes. */
+export function getPerformanceFactor(state: SoccerMatchState): number {
+  const diff = resolvedDifferential(state)
   const clamped = Math.max(
     -MAX_MEANINGFUL_GOAL_DIFFERENTIAL,
     Math.min(MAX_MEANINGFUL_GOAL_DIFFERENTIAL, diff),
@@ -150,7 +266,7 @@ export function createSoccerModule(
     id: 'soccer',
     ticksPerMatch: config.ticksPerMatch,
     createInitialState,
-    tick: (state, tickIndex) => tick(state, tickIndex, config),
+    tick: (state, tickIndex, context) => tick(state, tickIndex, config, context),
     getOutcome,
     getPerformanceFactor,
   }
@@ -407,25 +523,54 @@ export function trainingEffectMultiplier(level: number): number {
   return level * 2 ** milestonesPassed
 }
 
+/** The next not-yet-reached milestone level above `level`, or `null` once
+ *  every milestone in TRAINING_MILESTONE_LEVELS has been passed. Exported
+ *  so the UI can show a compact "next: 2x at Level N" indicator without
+ *  duplicating TRAINING_MILESTONE_LEVELS' shape — every milestone crossing
+ *  doubles the CURRENT cumulative effect, so "2x" is always the correct
+ *  framing for the next one, regardless of how many have already passed. */
+export function nextMilestoneLevel(level: number): number | null {
+  return TRAINING_MILESTONE_LEVELS.find((milestone) => level < milestone) ?? null
+}
+
+/** The largest already-crossed milestone at or below `level`, or `1` (the
+ *  starting level every tier's training begins at) if none have been
+ *  crossed yet. Paired with nextMilestoneLevel() so the UI can show
+ *  progress SINCE the previous milestone rather than the raw level over the
+ *  next one — the latter looks right only for the very first milestone (no
+ *  earlier one to net out against) and is misleadingly pre-filled for every
+ *  milestone after that (e.g. right after crossing to level 13, naively
+ *  showing `13/22` reads as 59% progress toward the NEXT doubling, despite
+ *  zero levels having been trained since the crossing that just happened). */
+export function previousMilestoneLevel(level: number): number {
+  let previous = 1
+  for (const milestone of TRAINING_MILESTONE_LEVELS) {
+    if (level >= milestone) previous = milestone
+  }
+  return previous
+}
+
 /**
- * Minimum "Improve Training" level required before a 'win' outcome is
- * achievable at this tier at all (see getOutcome's `context.minWinLevel` in
- * this file, and MatchContext in engine/types.ts) — below it, only
- * draw/loss can occur, full stop, no partial win chance. A flat `tierIndex +
- * 1` (1 for tier 0, escalating by exactly one level per tier, capping at 11
- * for The Multiverse Cup): simulated against the same real cost/revenue
- * curves used for the milestones above, this keeps every tier's very first
- * possible win within single-digit-minutes of dedicated manual play at the
- * low tiers, and a genuine but never-impossible few-hours-to-low-single-
- * digit-days investment at the very top tier (The Multiverse Cup, level 11)
- * — steeper escalation (e.g. doubling per tier) was tried and rejected
- * during simulation because this economy's exponential per-level cost
- * growth makes even level ~20-30 already many-days-to-unreachable at the
- * top tiers, which would make a top tier's win outcome effectively
- * impossible forever — the opposite of the intended "escalating but always
- * eventually achievable" gate. */
-export function minWinLevelForTier(tierIndex: number): number {
-  return tierIndex + 1
+ * The [min, max] level range this tier's per-match opponent is drawn from
+ * (see MatchContext.opponentLevelRange in engine/types.ts and
+ * resolveMatchOutcome above) — supersedes the earlier flat `minWinLevel`
+ * hard cliff entirely (see CLAUDE.md). Centered on the exact same
+ * `tierIndex + 1` anchor the old cliff used (1 for tier 0, up to 11 for The
+ * Multiverse Cup) — that number was already simulated last session against
+ * this game's real cost/revenue curves to land within single-digit-minutes
+ * of dedicated play at low tiers and a genuine-but-never-impossible few-
+ * hours-to-low-days investment at the top tier, and centering the new range
+ * on it preserves that calibration rather than re-deriving it from scratch.
+ * What changes is the shape: instead of "below this level, a win is
+ * impossible," a fixed ±2 spread around that center means EVERY match
+ * draws a slightly different opponent, and — combined with the continuous
+ * probability curve — even a tier a player has just reached (level 1) has a
+ * real, nonzero (if small) chance to win immediately, with the odds
+ * smoothly improving as training catches up to the range's center, rather
+ * than flipping from "impossible" to "normal" at one specific level. */
+export function opponentLevelRangeForTier(tierIndex: number): { min: number; max: number } {
+  const center = tierIndex + 1
+  return { min: Math.max(1, center - 2), max: center + 2 }
 }
 
 /** Real-world milliseconds between auto-play ticks for the tier at

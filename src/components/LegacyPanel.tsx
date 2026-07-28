@@ -48,8 +48,8 @@ function LegacyPanel() {
       ? ` It will also permanently reveal ${nextTierToReveal.name}.`
       : ''
     const trainingNote =
-      ' Every currently-unlocked tier\'s "Improve Training" level resets too, so wins at those tiers ' +
-      'may resolve as draws again until you retrain past their minimum win level.'
+      ' Every currently-unlocked tier\'s "Improve Training" level resets too, so your odds against ' +
+      'each tier\'s opponents drop back down until you retrain.'
     const confirmed = window.confirm(
       `Reset for Legacy?\n\nThis wipes all Revenue and every tier's level/unlocks/matches back ` +
         `to a fresh ${SOCCER_VENTURE_TIERS[0].name} start. You will gain ${previewGain} Legacy Points, ` +

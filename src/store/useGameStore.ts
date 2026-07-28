@@ -20,7 +20,8 @@ import {
   tierUpgradeCost,
   tierPerTickRevenue,
   trainingEffectMultiplier,
-  minWinLevelForTier,
+  opponentLevelRangeForTier,
+  TRAINING_MILESTONE_LEVELS,
   FIRST_PRESTIGE_TRIGGER_TIER_ID,
   isTierRevealed,
 } from '../sports/soccer/soccerModule'
@@ -164,6 +165,15 @@ function applyEarnedAchievements(
   }
 }
 
+/** A transient "training milestone crossed" toast (see Home.tsx's
+ *  NotificationToasts). Deliberately NOT persisted (absent from
+ *  partialize below) — these are momentary UI events, not save state; a
+ *  page reload should never resurrect a toast from a prior session. */
+export interface MilestoneNotification {
+  id: number
+  message: string
+}
+
 interface GameState {
   isInitialized: boolean
   tiers: VentureTier[]
@@ -171,6 +181,7 @@ interface GameState {
   legacy: LegacyState
   lifetimeStats: LifetimeStats
   achievements: AchievementsState
+  notifications: MilestoneNotification[]
   tickTier: (tierId: string) => void
   upgradeTier: (tierId: string) => void
   hireManagerForTier: (tierId: string) => void
@@ -178,6 +189,7 @@ interface GameState {
   resetProgress: () => void
   resetForLegacy: () => void
   purchaseLegacyUpgrade: (upgradeId: keyof typeof PERMANENT_UPGRADES) => void
+  dismissNotification: (id: number) => void
 }
 
 // Wrapped in zustand's persist middleware (localStorage) per CLAUDE.md's
@@ -193,6 +205,7 @@ export const useGameStore = create<GameState>()(
       legacy: createInitialLegacy(),
       lifetimeStats: createInitialLifetimeStats(),
       achievements: createInitialAchievements(),
+      notifications: [],
 
       // Advances one tier's match by exactly one tick, via the same
       // engine/economy path whether it's called from the idle interval
@@ -210,12 +223,13 @@ export const useGameStore = create<GameState>()(
         // actual choke point, not just Home.tsx's render slice.
         if (!isTierRevealed(tierIndex, legacy.prestigeCount)) return
 
-        // Threaded into both advanceTick and finalizeMatch below so the
-        // sport module can gate 'win' outcomes on this tier's own training
-        // level (see MatchContext in engine/types.ts and getOutcome in
-        // soccerModule.ts) — soccer's tick() itself ignores it, only
-        // getOutcome() consumes it.
-        const matchContext = { level: tier.level, minWinLevel: minWinLevelForTier(tierIndex) }
+        // Threaded into advanceTick below so the sport module can resolve
+        // this match's outcome from a level-gap-driven win probability (see
+        // MatchContext in engine/types.ts and resolveMatchOutcome in
+        // soccerModule.ts) — only consumed on a match's first tick; every
+        // later tick this match sees ignores it (the outcome's already
+        // decided and stored in the match state by then).
+        const matchContext = { level: tier.level, opponentLevelRange: opponentLevelRangeForTier(tierIndex) }
         const { state: nextMatch } = advanceTick(soccerModule, tier.match, tier.tickIndex, matchContext)
         const nextTickIndex = tier.tickIndex + 1
 
@@ -321,10 +335,34 @@ export const useGameStore = create<GameState>()(
         const cost = tierUpgradeCost(SOCCER_VENTURE_TIERS[tierIndex], tier.level)
         if (currencies.revenue < cost) return
 
-        set((s) => ({
-          currencies: { revenue: s.currencies.revenue - cost },
-          tiers: s.tiers.map((t, i) => (i === tierIndex ? { ...t, level: t.level + 1 } : t)),
-        }))
+        const nextLevel = tier.level + 1
+        // A single Improve Training purchase only ever raises level by
+        // exactly 1, so at most one milestone can be crossed per call in
+        // practice — filtering (rather than a single `includes` check)
+        // still handles a future multi-level jump correctly if one is ever
+        // introduced, without needing to revisit this code.
+        const crossedMilestones = TRAINING_MILESTONE_LEVELS.filter(
+          (milestone) => milestone > tier.level && milestone <= nextLevel,
+        )
+
+        set((s) => {
+          if (crossedMilestones.length === 0) {
+            return {
+              currencies: { revenue: s.currencies.revenue - cost },
+              tiers: s.tiers.map((t, i) => (i === tierIndex ? { ...t, level: nextLevel } : t)),
+            }
+          }
+          let nextId = s.notifications.length ? Math.max(...s.notifications.map((n) => n.id)) + 1 : 1
+          const newNotifications = crossedMilestones.map(() => ({
+            id: nextId++,
+            message: `${SOCCER_VENTURE_TIERS[tierIndex].name} Revenue 2x!`,
+          }))
+          return {
+            currencies: { revenue: s.currencies.revenue - cost },
+            tiers: s.tiers.map((t, i) => (i === tierIndex ? { ...t, level: nextLevel } : t)),
+            notifications: [...s.notifications, ...newNotifications],
+          }
+        })
       },
 
       // One-time purchase per tier: once hired, useMatchTicker starts
@@ -493,6 +531,13 @@ export const useGameStore = create<GameState>()(
           }))
         }
       },
+
+      // Removes one toast by id once its on-screen timer expires (see
+      // NotificationToasts.tsx). No-op if it's already gone — harmless if
+      // called twice for the same id (e.g. an unmount race).
+      dismissNotification: (id) => {
+        set((s) => ({ notifications: s.notifications.filter((n) => n.id !== id) }))
+      },
     }),
     {
       name: 'idle-sports-game-save',
@@ -520,6 +565,21 @@ export const useGameStore = create<GameState>()(
           const freshTiers = createInitialTiers(merged.legacy.permanentUpgrades)
           merged.tiers = [...merged.tiers, ...freshTiers.slice(merged.tiers.length)]
         }
+        // `notifications` is deliberately excluded from partialize (see
+        // MilestoneNotification's doc comment: toasts must never survive a
+        // reload) — but the blind `{...currentState, ...persistedState}`
+        // spread above would still copy it in if a hand-edited localStorage
+        // blob has a `notifications` key at all (this app never writes one
+        // there itself, but nothing stops a player's own edit from adding
+        // one back). An unguarded non-array value there (e.g. `null`) would
+        // crash NotificationToasts.tsx's unconditional `.length` check on
+        // the very next render; a stale array would resurrect old toasts,
+        // and any entry with a non-numeric `id` permanently poisons the
+        // `Math.max(...)+1` id generator in upgradeTier() for the rest of
+        // the session. Always keep the fresh, empty array from
+        // currentState instead — never trust a persisted value for this
+        // field, no matter its shape.
+        merged.notifications = currentState.notifications
         return merged
       },
     },
