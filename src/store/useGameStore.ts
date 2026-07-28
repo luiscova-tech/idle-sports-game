@@ -56,6 +56,7 @@ interface GameState {
   upgradeTier: (tierId: string) => void
   hireManagerForTier: (tierId: string) => void
   unlockTier: (tierId: string) => void
+  resetProgress: () => void
 }
 
 // Wrapped in zustand's persist middleware (localStorage) per CLAUDE.md's
@@ -187,6 +188,18 @@ export const useGameStore = create<GameState>()(
           currencies: { revenue: s.currencies.revenue - cost },
           tiers: s.tiers.map((t, i) => (i === tierIndex ? { ...t, unlocked: true } : t)),
         }))
+      },
+
+      // Wipes saved progress back to a brand-new player: fresh tiers,
+      // zero Revenue. Exists so players (and playtesters) can reset
+      // without needing browser devtools to clear localStorage directly —
+      // the persist middleware picks up this set() call the same as any
+      // other and re-saves the fresh state automatically.
+      resetProgress: () => {
+        set({
+          tiers: createInitialTiers(),
+          currencies: { revenue: 0 },
+        })
       },
     }),
     {

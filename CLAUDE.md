@@ -75,6 +75,12 @@ A lightweight design system was introduced to make ongoing playtesting legible, 
 - Buttons use a shared `.btn` base + role modifier (`--primary`, `--purchase`, `--unlock`) with an explicit disabled style (muted gray, not browser-default), so affordable vs. not is unambiguous at a glance.
 - Verified: build/lint clean, `git diff` confirms zero changes under `src/store/`, `src/engine/`, `src/hooks/`, `src/sports/`; checked visually in both light and dark color schemes via the browser preview tool.
 
+### Reset Progress button (seventh amendment to step 2)
+Added a player-facing way to wipe their save without needing browser devtools, since the Claude Browser pane's `localStorage` is a separate context from the player's own browser and can't be cleared remotely.
+- New store action `resetProgress()` in `useGameStore.ts`: sets `tiers` back to `createInitialTiers()` and `currencies` back to `{ revenue: 0 }`. The `persist` middleware picks up this `set()` the same as any other action, so it re-saves the fresh state to `localStorage` automatically — no separate storage-clearing code needed.
+- UI: a small muted "Reset Progress" button in the page header (`Home.tsx`/`App.css`, `.app-header__reset`), styled to recede visually (thin outline, muted text, turns red-ish only on hover) rather than compete with the primary Revenue display. Guarded by a native `window.confirm()` before calling `resetProgress()` — cheap, no new dependency, prevents an accidental misclick from wiping progress.
+- Verified: reset correctly zeroes all tiers/currencies and rewrites the `localStorage` entry; canceling the confirm dialog leaves progress untouched.
+
 ## Build Order (current status — update the checkboxes as work completes)
 - [x] 1. Scaffold React/Vite + Zustand, basic layout, empty store
 - [x] 2. Single-sport match-sim tick loop, one currency, minimal UI

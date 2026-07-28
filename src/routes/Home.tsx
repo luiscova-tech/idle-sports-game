@@ -6,7 +6,14 @@ import VentureCard from '../components/VentureCard'
 function Home() {
   const isInitialized = useGameStore((state) => state.isInitialized)
   const revenue = useGameStore((state) => state.currencies.revenue)
+  const resetProgress = useGameStore((state) => state.resetProgress)
   useMatchTicker()
+
+  const handleReset = () => {
+    if (window.confirm('Reset all progress? This clears your save and cannot be undone.')) {
+      resetProgress()
+    }
+  }
 
   return (
     <div className="app-shell">
@@ -19,6 +26,9 @@ function Home() {
           <span className="app-header__revenue-label">Total Revenue</span>
           <span className="app-header__revenue-value">{revenue}</span>
         </div>
+        <button type="button" className="app-header__reset" onClick={handleReset}>
+          Reset Progress
+        </button>
       </header>
 
       <div className="venture-list">
