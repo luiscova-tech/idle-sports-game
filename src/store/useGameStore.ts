@@ -381,14 +381,18 @@ interface GameState {
   baseballTiers: BaseballVentureTier[]
   /**
    * The per-save multiplicative rescale factor applied to
-   * `BASEBALL_VENTURE_TIERS`' four currency-scale fields (unlockCost,
-   * managerHireCost, upgradeBaseCost, baseRevenueMultiplier) — see
-   * `scaledBaseballTiers` (imported from baseballModule.ts) and CLAUDE.md's
-   * "income-rate-anchored entry costs" convention. `1` (a brand-new save's
-   * default, and every save's
-   * default before this convention existed) means baseball's costs read
-   * exactly as `BASEBALL_VENTURE_TIERS`' own hardcoded reference numbers —
-   * this field being `1` is a genuine no-op, not a placeholder.
+   * `BASEBALL_VENTURE_TIERS`' three COST fields ONLY (unlockCost,
+   * managerHireCost, upgradeBaseCost) — see `scaledBaseballTiers` (imported
+   * from baseballModule.ts) and CLAUDE.md's "income-rate-anchored entry
+   * costs" convention. Deliberately NEVER applied to `baseRevenueMultiplier`
+   * — see `scaledTierConfigs`' own doc comment (engine/ventureTiers.ts) for
+   * the real, shipped bug this exclusion fixes: revenue must be driven
+   * purely by level/training/manager-automation, with zero influence from
+   * how wealthy the player happens to be. `1` (a brand-new save's default,
+   * and every save's default before this convention existed) means
+   * baseball's costs read exactly as `BASEBALL_VENTURE_TIERS`' own
+   * hardcoded reference numbers — this field being `1` is a genuine no-op,
+   * not a placeholder.
    *
    * Established ONCE, either by `SCHEMA_MIGRATIONS[5]` (an existing save
    * migrating past the point this convention was introduced, anchored to
@@ -1001,10 +1005,15 @@ export const useGameStore = create<GameState>()(
         if (!tier.unlocked) return
 
         // The LIVE (per-save-anchored) config — not the raw
-        // BASEBALL_VENTURE_TIERS reference — so both per-tick and completion
-        // revenue scale by this save's own baseRevenueMultiplier anchor,
-        // keeping baseball's internal cost-vs-income pacing invariant while
-        // its absolute scale matches the player (see scaledBaseballTiers).
+        // BASEBALL_VENTURE_TIERS reference — for the same "one authoritative
+        // source" reason every other baseball action uses it (see
+        // scaledBaseballTiers' own doc comment). Note this does NOT mean
+        // per-tick/completion revenue is wealth-scaled: `config.
+        // baseRevenueMultiplier` is deliberately UNTOUCHED by the anchor
+        // (only unlockCost/managerHireCost/upgradeBaseCost are) — see
+        // scaledTierConfigs' doc comment for the real bug this exclusion
+        // fixes. Revenue here is computed from the exact same reference
+        // baseRevenueMultiplier every save sees, regardless of wealth.
         const config = scaledBaseballTiers(baseballCostAnchorMultiplier)[tierIndex]
         const legacyMultiplier = globalRevenueMultiplier(legacy.permanentUpgrades)
         const matchContext = {
@@ -1099,8 +1108,9 @@ export const useGameStore = create<GameState>()(
         const tier = baseballTiers[tierIndex]
         if (!tier.unlocked) return
         // Anchored config (see tickBaseballTier's own comment) — upgradeBaseCost
-        // is one of the four scaled fields, so training costs track this
+        // is one of the three scaled COST fields, so training costs track this
         // save's re-anchored ladder, not the raw reference numbers.
+        // baseRevenueMultiplier here is unaffected regardless (never scaled).
         const config = scaledBaseballTiers(baseballCostAnchorMultiplier)[tierIndex]
         const cost = tierUpgradeCost(config, tier.level)
         if (currencies.revenue < cost) return

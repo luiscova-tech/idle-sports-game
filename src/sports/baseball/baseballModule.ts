@@ -532,21 +532,27 @@ export const BASEBALL_COST_ANCHOR_SECONDS = 60
  * this project's confirmed design decision to keep baseball fully
  * independent of the Legacy/prestige system.
  *
- * IMPORTANT — these absolute numbers are now the REFERENCE CURVE (the
- * ladder's SHAPE), not necessarily the numbers a given player sees. As of
- * the "Income-rate-anchored entry costs" amendment (see CLAUDE.md), a save
+ * IMPORTANT — the three COST fields below (unlockCost/managerHireCost/
+ * upgradeBaseCost) are now the REFERENCE CURVE (the ladder's cost SHAPE),
+ * not necessarily the numbers a given player is charged. As of the
+ * "Income-rate-anchored entry costs" amendment (see CLAUDE.md), a save
  * carries a `baseballCostAnchorMultiplier` and the LIVE costs a player is
- * charged/shown are `scaledBaseballTiers(multiplier)` — these four
- * currency-scale fields (unlockCost/managerHireCost/upgradeBaseCost/
- * baseRevenueMultiplier) each multiplied by that per-save anchor, which was
- * derived once from the player's own aggregate income rate so entering the
- * sport reads as a real commitment relative to THEIR economy rather than a
- * fixed absolute that a soccer-rich player finds trivial. A multiplier of 1
- * (a fresh save, or the floor case) means these reference numbers ARE the
- * live numbers, unchanged. Every ratio here (tier-to-tier growth,
- * revenue-to-cost pacing) is preserved by the scaling — only the absolute
- * starting point moves — so the ~4.6-4.7x growth documented below still
- * describes the live ladder's shape exactly.
+ * charged/shown are `scaledBaseballTiers(multiplier)` — ONLY those three
+ * cost fields multiplied by that per-save anchor, which was derived once
+ * from the player's own aggregate income rate so entering the sport reads
+ * as a real commitment relative to THEIR economy rather than a fixed
+ * absolute that a soccer-rich player finds trivial. A multiplier of 1 (a
+ * fresh save, or the floor case) means these reference cost numbers ARE the
+ * live costs, unchanged. Tier-to-tier cost ratios are preserved by the
+ * scaling — only the absolute starting point moves — so the ~4.6-4.7x
+ * growth documented below still describes the live ladder's cost shape
+ * exactly.
+ *
+ * `baseRevenueMultiplier` below is NEVER scaled by the anchor, at any
+ * multiplier — see `scaledTierConfigs`' own doc comment (ventureTiers.ts)
+ * for the real bug this project shipped and fixed by that exclusion. This
+ * tier list's `baseRevenueMultiplier` values are the ONLY values baseball's
+ * revenue is ever computed from, for every player, regardless of wealth.
  */
 export const BASEBALL_VENTURE_TIERS: VentureTierConfig[] = [
   {
@@ -744,11 +750,11 @@ export function estimatedTicksForBaseballTier(
  * of exactly `1` (a brand-new save, or any save predating this convention)
  * reproduces `BASEBALL_VENTURE_TIERS` byte-for-byte: a pure pass-through, not
  * a behavior change. `id`/`name`/`icon`/`upgradeCostGrowth` are unchanged;
- * only the four currency-scale fields (unlockCost, managerHireCost,
- * upgradeBaseCost, baseRevenueMultiplier) are scaled — see scaledTierConfigs'
- * own doc comment for why scaling exactly those four (and NOT
- * upgradeCostGrowth) relocates the ladder's absolute scale while preserving
- * its shape/pacing byte-for-byte.
+ * only the three COST fields (unlockCost, managerHireCost, upgradeBaseCost)
+ * are scaled — `baseRevenueMultiplier` is DELIBERATELY excluded (see
+ * `scaledTierConfigs`' own doc comment for the real bug this project shipped
+ * and fixed by that exclusion: revenue must never scale with the player's
+ * wealth, only cost does).
  */
 export function scaledBaseballTiers(anchorMultiplier: number): VentureTierConfig[] {
   return scaledTierConfigs(BASEBALL_VENTURE_TIERS, anchorMultiplier)

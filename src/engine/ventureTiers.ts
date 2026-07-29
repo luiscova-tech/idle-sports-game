@@ -72,18 +72,32 @@ export function tierUpgradeCost(config: VentureTierConfig, currentLevel: number)
 /**
  * Rescales a WHOLE reference tier ladder by a single multiplicative factor —
  * the sport-agnostic mechanism behind this project's "income-rate-anchored
- * entry costs" standing convention (see CLAUDE.md). Multiplies every one of
- * the four CURRENCY-scale fields (`unlockCost`, `managerHireCost`,
- * `upgradeBaseCost`, `baseRevenueMultiplier`) by `anchorMultiplier`, rounded;
- * `id`/`name`/`icon`/`upgradeCostGrowth` pass through unchanged.
- * `upgradeCostGrowth` deliberately does NOT get rescaled — it's a
- * dimensionless per-level growth RATE, not an absolute currency amount, so
- * leaving it alone is what makes the ladder's SHAPE (both its tier-to-tier
- * cost ratios and each tier's own internal revenue-to-cost pacing) come out
- * byte-for-byte identical to the reference curve, just relocated to a new
- * absolute starting point. This is why a single scalar is sufficient to
- * "re-anchor" an entire ladder at once, rather than needing to separately
- * re-derive each tier's own ratio.
+ * entry costs" standing convention (see CLAUDE.md). Multiplies ONLY the
+ * three COST-side fields (`unlockCost`, `managerHireCost`, `upgradeBaseCost`)
+ * by `anchorMultiplier`, rounded; `id`/`name`/`icon`/`upgradeCostGrowth`
+ * pass through unchanged.
+ *
+ * `baseRevenueMultiplier` is DELIBERATELY, EXPLICITLY excluded from scaling —
+ * see the "cost-anchoring must never touch revenue fields" note in
+ * CLAUDE.md. This function previously scaled it alongside the cost fields
+ * (a real, shipped bug — see CLAUDE.md's dedicated writeup), which let a
+ * wealthy player's re-anchored baseball tier generate revenue proportional
+ * to their EXISTING wealth rather than their actual level/training/manager
+ * investment in that tier — a fresh Level-1 tier could out-earn a
+ * heavily-trained one by orders of magnitude, completely defeating the
+ * anchor's purpose (higher entry cost was supposed to mean a REAL grind, not
+ * a bigger-looking but equally-trivial one). Revenue must be driven purely
+ * by the SAME mechanics as soccer: `level`/`trainingEffectMultiplier`/
+ * `managerHired` automation status — zero influence from how wealthy the
+ * player happens to be.
+ *
+ * `upgradeCostGrowth` also does NOT get rescaled — it's a dimensionless
+ * per-level growth RATE, not an absolute currency amount, so leaving it
+ * alone is what makes the ladder's cost SHAPE (tier-to-tier cost ratios)
+ * come out byte-for-byte identical to the reference curve, just relocated to
+ * a new absolute starting point. This is why a single scalar is sufficient
+ * to "re-anchor" an entire ladder's COSTS at once, rather than needing to
+ * separately re-derive each tier's own ratio.
  */
 export function scaledTierConfigs(
   referenceTiers: VentureTierConfig[],
@@ -94,7 +108,8 @@ export function scaledTierConfigs(
     unlockCost: Math.round(config.unlockCost * anchorMultiplier),
     managerHireCost: Math.round(config.managerHireCost * anchorMultiplier),
     upgradeBaseCost: Math.round(config.upgradeBaseCost * anchorMultiplier),
-    baseRevenueMultiplier: Math.round(config.baseRevenueMultiplier * anchorMultiplier),
+    // baseRevenueMultiplier is INTENTIONALLY absent here — see this
+    // function's own doc comment above. Do not add it back.
   }))
 }
 
