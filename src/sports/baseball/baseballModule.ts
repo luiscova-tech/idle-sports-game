@@ -478,16 +478,24 @@ export function createBaseballModule(
 }
 
 /**
- * Baseball's venture tiers — Phase 1 of 2 (see CLAUDE.md's "Baseball"
- * amendment): a small 3-tier VALIDATION SLICE at real age-level innings
- * counts, deliberately NOT the full grounded -> epic -> absurd arc soccer
- * has. Costs/multipliers were calibrated to feel roughly proportionate to
+ * Baseball's venture tiers. Phase 1 (see CLAUDE.md's "Baseball" amendment)
+ * shipped a small 3-tier VALIDATION SLICE at real age-level innings counts.
+ * Phase 2 (see CLAUDE.md's "Baseball: Phase 2" amendment) completes the REAL
+ * side of the arc with three more real age/level tiers (college, minor
+ * league, MLB) — a MECHANICAL CONTINUATION of the exact cost/multiplier
+ * curve the first 3 tiers already established, not a new balance pass (same
+ * treatment soccer's own tier 5-6 addition got in its eighth amendment).
+ * Costs/multipliers were calibrated to feel roughly proportionate to
  * soccer's own early-tier curve, interleaved a bit further out than
  * soccer's equivalent depth (unlocking a whole SECOND sport is meant to
  * read as a bigger milestone than soccer's own next tier) — see CLAUDE.md
  * for the exact reasoning. Baseball's first tier does NOT start unlocked
  * (unlike soccer's local-game) — entering this sport at all is its own
  * deliberate purchase (see useGameStore.ts's createInitialBaseballTiers).
+ *
+ * The fictional grounded->epic->absurd arc beyond MLB (mirroring soccer's
+ * own tiers 7-11) is NOT implemented here yet — it's a documented PROPOSAL
+ * only (see CLAUDE.md), pending review before any tier configs are written.
  */
 export const BASEBALL_VENTURE_TIERS: VentureTierConfig[] = [
   {
@@ -520,18 +528,58 @@ export const BASEBALL_VENTURE_TIERS: VentureTierConfig[] = [
     upgradeBaseCost: 27000,
     upgradeCostGrowth: 1.75,
   },
+  // Phase 2's three new real tiers — see CLAUDE.md's "Baseball: Phase 2"
+  // amendment for the exact ratio derivation. unlockCost/managerHireCost
+  // continue the ~4.6-4.7x per-tier growth the first 3 tiers already
+  // established (5.0x, 4.667x); upgradeBaseCost continues its own ~4x
+  // convergence (4.375x, 3.857x); upgradeCostGrowth continues the flat
+  // +0.05-per-tier pattern; baseRevenueMultiplier continues its own
+  // (INCREASING, unlike soccer's decreasing one) ratio trend (2.25x,
+  // 2.889x), stabilizing around ~3.1-3.25x — a faithful continuation of
+  // baseball's OWN established curve, not an import of soccer's own
+  // decreasing-ratio philosophy.
+  {
+    id: 'omaha-bound',
+    name: 'Omaha Bound',
+    icon: '🎒',
+    baseRevenueMultiplier: 400,
+    unlockCost: 325000,
+    managerHireCost: 350000,
+    upgradeBaseCost: 108000,
+    upgradeCostGrowth: 1.8,
+  },
+  {
+    id: 'triple-a-call-up',
+    name: 'Triple-A Call-Up',
+    icon: '⬆️',
+    baseRevenueMultiplier: 1300,
+    unlockCost: 1500000,
+    managerHireCost: 1600000,
+    upgradeBaseCost: 430000,
+    upgradeCostGrowth: 1.85,
+  },
+  {
+    id: 'the-show',
+    name: 'The Show',
+    icon: '🌟',
+    baseRevenueMultiplier: 4200,
+    unlockCost: 7000000,
+    managerHireCost: 7500000,
+    upgradeBaseCost: 1720000,
+    upgradeCostGrowth: 1.9,
+  },
 ]
 
-/** Real age-level innings counts for each of the 3 validation-slice tiers,
- *  indexed the same way as BASEBALL_VENTURE_TIERS — T-ball/rec-league games
- *  are commonly played over 3 innings, Little League over 6, and high
- *  school (Varsity) over 7 (college/pro, both 9 innings, are explicitly
- *  future tiers — see CLAUDE.md). Kept as a parallel array rather than a
+/** Real age-level innings counts for each tier, indexed the same way as
+ *  BASEBALL_VENTURE_TIERS — T-ball/rec-league games are commonly played
+ *  over 3 innings, Little League over 6, high school (Varsity) over 7, and
+ *  college/minor-league/MLB all over the full real 9 (see CLAUDE.md's
+ *  "Baseball: Phase 2" amendment). Kept as a parallel array rather than a
  *  field on VentureTierConfig since inning count is baseball-specific
  *  vocabulary, not something the shared generic tier-config shape should
  *  know about (mirrors how soccer's opponent-level-range is ALSO computed
  *  from tierIndex externally, never stored on the tier config itself). */
-export const BASEBALL_TIER_INNINGS = [3, 6, 7]
+export const BASEBALL_TIER_INNINGS = [3, 6, 7, 9, 9, 9]
 
 export function inningsForBaseballTier(tierIndex: number): number {
   return BASEBALL_TIER_INNINGS[tierIndex] ?? BASEBALL_TIER_INNINGS[BASEBALL_TIER_INNINGS.length - 1]

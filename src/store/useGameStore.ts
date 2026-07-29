@@ -394,7 +394,7 @@ interface GameState {
  * resolved outcome, so tolerant reads are the right fix there, not a
  * migration step here.
  */
-const CURRENT_SCHEMA_VERSION = 3
+const CURRENT_SCHEMA_VERSION = 4
 
 /**
  * SCHEMA_MIGRATIONS[v] transforms a persisted state KNOWN to be shaped like
@@ -457,6 +457,30 @@ const SCHEMA_MIGRATIONS: Record<number, (state: any) => any> = {
   // never-trust-persisted-shape posture for tiers/baseballTiers/notifications
   // above, just for a plain-object field instead of an array one.
   2: (state: any) => ({ ...state, lifetimeStats: sanitizeLifetimeStats(state?.lifetimeStats) }),
+  // Version 3 -> 4: baseball's own tier list grew from 3 tiers (the Phase 1
+  // validation slice) to 6 (Phase 2's three new real tiers — college, minor
+  // league, MLB; see CLAUDE.md's "Baseball: Phase 2" amendment). A
+  // version-3 save's `baseballTiers` is REAL and already has real per-tier
+  // progress on tiers 0-2 — this pads it with 3 fresh locked tiers rather
+  // than replacing it outright, the exact same "pad an old array to the
+  // current shape, preserve everything already there" pattern
+  // SCHEMA_MIGRATIONS[0] already established for soccer's own `tiers` array
+  // when IT grew (6 -> 11 tiers, the ninth amendment). Deliberately NOT the
+  // same shape as SCHEMA_MIGRATIONS[1] above (which fully REPLACES
+  // baseballTiers) — that step only ever runs against a version 0/1 save,
+  // which predates baseballTiers existing as a real feature at all (nothing
+  // to preserve there); this step runs against a version-3 save, which DOES
+  // have real progress to preserve.
+  3: (state: any) => {
+    if (Array.isArray(state?.baseballTiers) && state.baseballTiers.length < BASEBALL_VENTURE_TIERS.length) {
+      const freshBaseballTiers = createInitialBaseballTiers()
+      state = {
+        ...state,
+        baseballTiers: [...state.baseballTiers, ...freshBaseballTiers.slice(state.baseballTiers.length)],
+      }
+    }
+    return state
+  },
 }
 
 function migrateGameState(persistedState: unknown, version: number): unknown {
