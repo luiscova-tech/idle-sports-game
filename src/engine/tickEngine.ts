@@ -20,11 +20,24 @@ export function advanceTick<TState>(
   return module.tick(state, tickIndex, context)
 }
 
-/** Pure helper: has this match run out of ticks? */
+/**
+ * Pure helper: is this match over? For a fixed-length sport (soccer, no
+ * `isMatchComplete` of its own), this is exactly the original check — has
+ * the tick count reached ticksPerMatch. For a sport with a genuinely
+ * variable match length (baseball), the sport module's OWN
+ * `isMatchComplete(state)` is authoritative instead, since a raw tick count
+ * can't tell you whether e.g. all innings have actually been played — see
+ * SportModule.isMatchComplete's doc comment in types.ts. `state` is the
+ * result of the tick that just ran (i.e. `advanceTick`'s return value),
+ * needed only by the variable-length path; a fixed-length sport's check
+ * ignores it entirely.
+ */
 export function isMatchComplete<TState>(
   module: SportModule<TState>,
   tickIndexAfterTick: number,
+  state: TState,
 ): boolean {
+  if (module.isMatchComplete) return module.isMatchComplete(state)
   return tickIndexAfterTick >= module.ticksPerMatch
 }
 

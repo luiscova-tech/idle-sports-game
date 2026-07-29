@@ -55,10 +55,21 @@ function LegacyPanel() {
     const trainingNote =
       ' Every currently-unlocked tier\'s "Improve Training" level resets too, so your odds against ' +
       'each tier\'s opponents drop back down until you retrain.'
+    // Explicit, per an adversarial-review finding: Revenue is ONE shared
+    // pool spent/earned by both soccer AND baseball tiers — the "wipes all
+    // Revenue" clause below is easy to misread as "wipes soccer's Revenue"
+    // in a sentence otherwise entirely about the soccer ladder, but it
+    // really does zero out any baseball capital too, even though baseball
+    // tiers' own unlocked/level/manager progress is untouched by this
+    // reset. Disclosed here, before the (irreversible) action, so a player
+    // invested in both sports isn't surprised afterward.
+    const baseballNote =
+      ' Your baseball tiers\' own unlock/training/manager progress is untouched, but since Revenue ' +
+      'is one shared pool, any Revenue you were banking toward baseball gets wiped along with everything else.'
     const confirmed = window.confirm(
-      `Reset for Legacy?\n\nThis wipes all Revenue and every tier's level/unlocks/matches back ` +
+      `Reset for Legacy?\n\nThis wipes all Revenue and every soccer tier's level/unlocks/matches back ` +
         `to a fresh ${SOCCER_VENTURE_TIERS[0].name} start. You will gain ${previewGain} Legacy Points, ` +
-        `which are kept permanently along with any Legacy upgrades you've bought.${revealNote}${trainingNote} This cannot be undone.`,
+        `which are kept permanently along with any Legacy upgrades you've bought.${revealNote}${trainingNote}${baseballNote} This cannot be undone.`,
     )
     if (confirmed) resetForLegacy()
   }

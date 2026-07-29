@@ -1,8 +1,6 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import type { StorageValue, PersistStorage } from 'zustand/middleware'
-import { advanceTick, isMatchComplete, finalizeMatch } from '../engine/tickEngine'
-import type { MatchOutcome } from '../engine/types'
 import {
   calculateLegacyPoints,
   createInitialPermanentUpgrades,
@@ -15,41 +13,40 @@ import {
 } from '../engine/prestige'
 import { checkNewlyEarnedAchievements, assertNeverRewardType } from '../engine/achievements'
 import {
+  type VentureTierState,
+  tierUpgradeCost,
+  opponentLevelRangeForTier,
+  TRAINING_MILESTONE_LEVELS,
+  resolveVentureTierTick,
+} from '../engine/ventureTiers'
+import {
   createSoccerModule,
   type SoccerMatchState,
   SOCCER_VENTURE_TIERS,
-  tierUpgradeCost,
-  tierPerTickRevenue,
-  trainingEffectMultiplier,
-  opponentLevelRangeForTier,
-  TRAINING_MILESTONE_LEVELS,
   isTierRevealed,
   allVisibleTiersUnlocked,
 } from '../sports/soccer/soccerModule'
+import {
+  createBaseballModule,
+  type BaseballMatchState,
+  BASEBALL_VENTURE_TIERS,
+  inningsForBaseballTier,
+} from '../sports/baseball/baseballModule'
 
-// Single module-scoped instance of the currently plugged-in sport. Every
-// venture tier below runs its own independent match through this same
-// instance — only the payout multiplier differs per tier, never the sim
-// itself. Later build-order steps may make the sport selectable; for v1
-// there is only soccer.
+// Single module-scoped instance of each currently plugged-in sport. Every
+// venture tier for a given sport runs its own independent match through
+// that ONE shared instance — only the payout multiplier differs per tier,
+// never the sim itself. Baseball is the second sport (Build Order step 3 —
+// see CLAUDE.md's "Baseball" amendment); a third would follow the exact
+// same shape.
 const soccerModule = createSoccerModule()
+const baseballModule = createBaseballModule()
 
-export interface VentureTier {
-  id: string
-  unlocked: boolean
-  /** "Improve Training" level — raises this tier's revenue multiplier. */
-  level: number
-  managerHired: boolean
-  tickIndex: number
-  match: SoccerMatchState
-  matchesCompleted: number
-  /** Lifetime Revenue earned FROM this tier specifically — an informational
-   *  stat only. Unlocking the next tier is a deliberate purchase from the
-   *  player's current spendable balance (see unlockTier), not gated on
-   *  this; Revenue itself stays one global pool in `currencies`. */
-  cumulativeRevenue: number
-  lastOutcome: MatchOutcome | null
-}
+/** The state every venture tier tracks, generic over that sport's own
+ *  opaque match-state shape — see VentureTierState in engine/ventureTiers.ts
+ *  for why this shape has nothing sport-specific about it. */
+export type VentureTier = VentureTierState<SoccerMatchState>
+export type BaseballVentureTier = VentureTierState<BaseballMatchState>
 
 // Takes the currently-owned permanent upgrades so a prestige reset (which
 // keeps those upgrades) and the very first-ever game start (which has none
@@ -64,6 +61,26 @@ function createInitialTiers(permanentUpgrades: PermanentUpgradeLevels): VentureT
     managerHired: false,
     tickIndex: 0,
     match: soccerModule.createInitialState(),
+    matchesCompleted: 0,
+    cumulativeRevenue: 0,
+    lastOutcome: null,
+  }))
+}
+
+/** Baseball tiers are deliberately independent of the Legacy/prestige
+ *  system (see CLAUDE.md's "Baseball" amendment) — no permanent-upgrade
+ *  pre-unlock concept applies here, unlike soccer's Fast Track. Every
+ *  baseball tier, including the first (Tee Time), starts LOCKED: entering
+ *  a second sport at all is its own deliberate milestone purchase, not a
+ *  freebie the way soccer's own first tier is. */
+function createInitialBaseballTiers(): BaseballVentureTier[] {
+  return BASEBALL_VENTURE_TIERS.map((config) => ({
+    id: config.id,
+    unlocked: false,
+    level: 1,
+    managerHired: false,
+    tickIndex: 0,
+    match: baseballModule.createInitialState(),
     matchesCompleted: 0,
     cumulativeRevenue: 0,
     lastOutcome: null,
@@ -188,6 +205,15 @@ interface GameState {
    *  only, always kept equal to it. */
   schemaVersion: number
   tiers: VentureTier[]
+  /** Baseball's own parallel tier list (see CLAUDE.md's "Baseball"
+   *  amendment) — a SEPARATE array from soccer's `tiers`, not merged into
+   *  one heterogeneous list, so each sport's own match-state shape stays
+   *  concretely typed rather than needing a runtime type-discriminator on
+   *  every tier. Shares the SAME global `currencies.revenue` pool as
+   *  soccer (see tickBaseballTier/unlockBaseballTier below) — Revenue
+   *  stays one currency across every sport, per this project's currency-
+   *  separation-by-TYPE-not-by-sport principle. */
+  baseballTiers: BaseballVentureTier[]
   currencies: { revenue: number }
   legacy: LegacyState
   lifetimeStats: LifetimeStats
@@ -197,6 +223,10 @@ interface GameState {
   upgradeTier: (tierId: string) => void
   hireManagerForTier: (tierId: string) => void
   unlockTier: (tierId: string) => void
+  tickBaseballTier: (tierId: string) => void
+  upgradeBaseballTier: (tierId: string) => void
+  hireManagerForBaseballTier: (tierId: string) => void
+  unlockBaseballTier: (tierId: string) => void
   resetProgress: () => void
   resetForLegacy: () => void
   purchaseLegacyUpgrade: (upgradeId: keyof typeof PERMANENT_UPGRADES) => void
@@ -232,7 +262,7 @@ interface GameState {
  * resolved outcome, so tolerant reads are the right fix there, not a
  * migration step here.
  */
-const CURRENT_SCHEMA_VERSION = 1
+const CURRENT_SCHEMA_VERSION = 2
 
 /**
  * SCHEMA_MIGRATIONS[v] transforms a persisted state KNOWN to be shaped like
@@ -258,6 +288,19 @@ const SCHEMA_MIGRATIONS: Record<number, (state: any) => any> = {
       const permanentUpgrades = state?.legacy?.permanentUpgrades ?? createInitialPermanentUpgrades()
       const freshTiers = createInitialTiers(permanentUpgrades)
       state = { ...state, tiers: [...state.tiers, ...freshTiers.slice(state.tiers.length)] }
+    }
+    return state
+  },
+  // Version 1 -> 2: baseball's own tier list (`baseballTiers`) is new as of
+  // this version — a version-1 save has no such field at all. This is a
+  // straightforward "backfill a missing array with fresh defaults" step,
+  // the exact same shape as version 0's own tiers-padding migration above
+  // (this project's standing schema-versioning convention exists precisely
+  // so a NEW persisted field like this one gets a real migration step
+  // instead of just being silently absent-then-undefined on an old save).
+  1: (state: any) => {
+    if (!Array.isArray(state?.baseballTiers) || state.baseballTiers.length !== BASEBALL_VENTURE_TIERS.length) {
+      state = { ...state, baseballTiers: createInitialBaseballTiers() }
     }
     return state
   },
@@ -315,6 +358,7 @@ export const useGameStore = create<GameState>()(
       isInitialized: true,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       tiers: createInitialTiers(createInitialLegacy().permanentUpgrades),
+      baseballTiers: createInitialBaseballTiers(),
       currencies: { revenue: startingRevenue(createInitialLegacy().permanentUpgrades) },
       legacy: createInitialLegacy(),
       lifetimeStats: createInitialLifetimeStats(),
@@ -324,7 +368,15 @@ export const useGameStore = create<GameState>()(
       // Advances one tier's match by exactly one tick, via the same
       // engine/economy path whether it's called from the idle interval
       // (useMatchTicker) or a manual "Push the Attack" click (VentureCard) —
-      // there is no separate manual-resolution logic per tier.
+      // there is no separate manual-resolution logic per tier. The actual
+      // per-tick/completion resolution math is the shared
+      // resolveVentureTierTick (engine/ventureTiers.ts) — this action is
+      // just the store-side wiring (which array, which currency bucket)
+      // around it. tickBaseballTier below is the structurally-parallel
+      // twin for baseball; see this project's Testing Conventions in
+      // CLAUDE.md for why this specific amount of plumbing duplication
+      // (not the underlying economic MATH, which is fully shared) was a
+      // deliberate, documented tradeoff for this validation slice.
       tickTier: (tierId) => {
         const { tiers, legacy } = get()
         const tierIndex = tiers.findIndex((t) => t.id === tierId)
@@ -337,54 +389,35 @@ export const useGameStore = create<GameState>()(
         // actual choke point, not just Home.tsx's render slice.
         if (!isTierRevealed(tierIndex, legacy.prestigeCount)) return
 
-        // Threaded into advanceTick below so the sport module can resolve
-        // this match's outcome from a level-gap-driven win probability (see
-        // MatchContext in engine/types.ts and resolveMatchOutcome in
-        // soccerModule.ts) — only consumed on a match's first tick; every
-        // later tick this match sees ignores it (the outcome's already
-        // decided and stored in the match state by then).
-        const matchContext = { level: tier.level, opponentLevelRange: opponentLevelRangeForTier(tierIndex) }
-        const { state: nextMatch } = advanceTick(soccerModule, tier.match, tier.tickIndex, matchContext)
-        const nextTickIndex = tier.tickIndex + 1
-
-        // Direct per-tick Revenue: the primary generator, granted identically
-        // whether this tick was triggered by a manual "Push the Attack" click
-        // or the auto-play interval — same tickTier() path, no fork. This is
-        // on top of (never instead of) the match-completion bonus below.
-        // Both are scaled by the permanent Legacy "Revenue Boost" multiplier
-        // (1 if never prestiged/purchased — no behavior change pre-prestige).
         const config = SOCCER_VENTURE_TIERS[tierIndex]
         const legacyMultiplier = globalRevenueMultiplier(legacy.permanentUpgrades)
-        const perTickRevenue = Math.round(tierPerTickRevenue(config, tier.level) * legacyMultiplier)
+        const matchContext = { level: tier.level, opponentLevelRange: opponentLevelRangeForTier(tierIndex) }
+        const result = resolveVentureTierTick(soccerModule, tier, matchContext, config, legacyMultiplier)
 
-        if (isMatchComplete(soccerModule, nextTickIndex)) {
-          const { outcome, revenue: baseRevenue } = finalizeMatch(soccerModule, nextMatch, matchContext)
-          const completionBonus = Math.round(
-            baseRevenue * config.baseRevenueMultiplier * trainingEffectMultiplier(tier.level) * legacyMultiplier,
-          )
-          const totalEarned = perTickRevenue + completionBonus
-
+        if (result.completed) {
+          const totalEarned = result.perTickRevenue + (result.completionBonus ?? 0)
           set((s) => {
             const updatedTiers = s.tiers.map((t, i) =>
               i === tierIndex
                 ? {
                     ...t,
-                    match: soccerModule.createInitialState(),
-                    tickIndex: 0,
+                    match: result.nextMatch,
+                    tickIndex: result.nextTickIndex,
                     matchesCompleted: t.matchesCompleted + 1,
                     cumulativeRevenue: t.cumulativeRevenue + totalEarned,
-                    lastOutcome: outcome,
+                    lastOutcome: result.outcome ?? t.lastOutcome,
                   }
                 : t,
             )
 
-            // Lifetime win count (across every tier combined) feeds the
-            // achievement framework — see LifetimeStats above. Checked and
-            // granted atomically in this same set() (via the shared
-            // applyEarnedAchievements() helper, also called from the
-            // non-completion branch below) so the UI never renders a frame
-            // where the reward landed but the badge hasn't, or vice versa.
-            const totalWins = s.lifetimeStats.totalWins + (outcome === 'win' ? 1 : 0)
+            // Lifetime win count (across every venture tier of every sport
+            // combined) feeds the achievement framework — see LifetimeStats
+            // above. Checked and granted atomically in this same set() (via
+            // the shared applyEarnedAchievements() helper, also called from
+            // the non-completion branch below AND from baseball's own tick
+            // action) so the UI never renders a frame where the reward
+            // landed but the badge hasn't, or vice versa.
+            const totalWins = s.lifetimeStats.totalWins + (result.outcome === 'win' ? 1 : 0)
             const granted = applyEarnedAchievements(
               { totalWins },
               s.achievements.earnedIds,
@@ -406,9 +439,9 @@ export const useGameStore = create<GameState>()(
               i === tierIndex
                 ? {
                     ...t,
-                    match: nextMatch,
-                    tickIndex: nextTickIndex,
-                    cumulativeRevenue: t.cumulativeRevenue + perTickRevenue,
+                    match: result.nextMatch,
+                    tickIndex: result.nextTickIndex,
+                    cumulativeRevenue: t.cumulativeRevenue + result.perTickRevenue,
                   }
                 : t,
             )
@@ -423,7 +456,7 @@ export const useGameStore = create<GameState>()(
             const granted = applyEarnedAchievements(
               { totalWins: s.lifetimeStats.totalWins },
               s.achievements.earnedIds,
-              s.currencies.revenue + perTickRevenue,
+              s.currencies.revenue + result.perTickRevenue,
               s.legacy.legacyPoints,
             )
 
@@ -525,6 +558,163 @@ export const useGameStore = create<GameState>()(
         }))
       },
 
+      // Baseball's own tick/upgrade/hire-manager/unlock actions — the
+      // structurally-parallel twin of soccer's four actions above, over
+      // `baseballTiers` instead of `tiers` and BASEBALL_VENTURE_TIERS
+      // instead of SOCCER_VENTURE_TIERS. Deliberately NOT gated by
+      // isTierRevealed/prestigeCount at all — baseball exists independently
+      // of the Legacy/prestige system for this validation slice (see
+      // CLAUDE.md's "Baseball" amendment): every baseball tier is either
+      // locked (needs its own unlockBaseballTier purchase) or unlocked,
+      // with no hidden-until-prestige reveal concept layered on top. Shares
+      // the exact same global `currencies.revenue` pool, the same
+      // globalRevenueMultiplier/unlockCostMultiplier Legacy multipliers
+      // (Revenue Boost/Veteran Discount apply to "every tier, every run,
+      // forever" — already documented as sport-agnostic, not soccer-only),
+      // and feeds the exact same shared `lifetimeStats.totalWins`
+      // achievement line as soccer (that line's own documented philosophy
+      // is "total wins across every venture tier combined," not "every
+      // soccer venture tier").
+      tickBaseballTier: (tierId) => {
+        const { baseballTiers, legacy } = get()
+        const tierIndex = baseballTiers.findIndex((t) => t.id === tierId)
+        if (tierIndex === -1) return
+        const tier = baseballTiers[tierIndex]
+        if (!tier.unlocked) return
+
+        const config = BASEBALL_VENTURE_TIERS[tierIndex]
+        const legacyMultiplier = globalRevenueMultiplier(legacy.permanentUpgrades)
+        const matchContext = {
+          level: tier.level,
+          opponentLevelRange: opponentLevelRangeForTier(tierIndex),
+          matchLength: inningsForBaseballTier(tierIndex),
+        }
+        const result = resolveVentureTierTick(baseballModule, tier, matchContext, config, legacyMultiplier)
+
+        if (result.completed) {
+          const totalEarned = result.perTickRevenue + (result.completionBonus ?? 0)
+          set((s) => {
+            const updatedTiers = s.baseballTiers.map((t, i) =>
+              i === tierIndex
+                ? {
+                    ...t,
+                    match: result.nextMatch,
+                    tickIndex: result.nextTickIndex,
+                    matchesCompleted: t.matchesCompleted + 1,
+                    cumulativeRevenue: t.cumulativeRevenue + totalEarned,
+                    lastOutcome: result.outcome ?? t.lastOutcome,
+                  }
+                : t,
+            )
+            const totalWins = s.lifetimeStats.totalWins + (result.outcome === 'win' ? 1 : 0)
+            const granted = applyEarnedAchievements(
+              { totalWins },
+              s.achievements.earnedIds,
+              s.currencies.revenue + totalEarned,
+              s.legacy.legacyPoints,
+            )
+            return {
+              baseballTiers: updatedTiers,
+              currencies: { revenue: granted.revenue },
+              lifetimeStats: { ...s.lifetimeStats, totalWins },
+              achievements: granted.grantedCount ? { earnedIds: granted.earnedIds } : s.achievements,
+              legacy: granted.grantedCount ? { ...s.legacy, legacyPoints: granted.legacyPoints } : s.legacy,
+            }
+          })
+        } else {
+          set((s) => {
+            const updatedTiers = s.baseballTiers.map((t, i) =>
+              i === tierIndex
+                ? { ...t, match: result.nextMatch, tickIndex: result.nextTickIndex, cumulativeRevenue: t.cumulativeRevenue + result.perTickRevenue }
+                : t,
+            )
+            const granted = applyEarnedAchievements(
+              { totalWins: s.lifetimeStats.totalWins },
+              s.achievements.earnedIds,
+              s.currencies.revenue + result.perTickRevenue,
+              s.legacy.legacyPoints,
+            )
+            return {
+              baseballTiers: updatedTiers,
+              currencies: { revenue: granted.revenue },
+              achievements: granted.grantedCount ? { earnedIds: granted.earnedIds } : s.achievements,
+              legacy: granted.grantedCount ? { ...s.legacy, legacyPoints: granted.legacyPoints } : s.legacy,
+            }
+          })
+        }
+      },
+
+      upgradeBaseballTier: (tierId) => {
+        const { baseballTiers, currencies } = get()
+        const tierIndex = baseballTiers.findIndex((t) => t.id === tierId)
+        if (tierIndex === -1) return
+        const tier = baseballTiers[tierIndex]
+        if (!tier.unlocked) return
+        const cost = tierUpgradeCost(BASEBALL_VENTURE_TIERS[tierIndex], tier.level)
+        if (currencies.revenue < cost) return
+
+        const nextLevel = tier.level + 1
+        const crossedMilestones = TRAINING_MILESTONE_LEVELS.filter(
+          (milestone) => milestone > tier.level && milestone <= nextLevel,
+        )
+
+        set((s) => {
+          if (crossedMilestones.length === 0) {
+            return {
+              currencies: { revenue: s.currencies.revenue - cost },
+              baseballTiers: s.baseballTiers.map((t, i) => (i === tierIndex ? { ...t, level: nextLevel } : t)),
+            }
+          }
+          let nextId = s.notifications.length ? Math.max(...s.notifications.map((n) => n.id)) + 1 : 1
+          const newNotifications = crossedMilestones.map(() => ({
+            id: nextId++,
+            message: `${BASEBALL_VENTURE_TIERS[tierIndex].name} Revenue 2x!`,
+          }))
+          return {
+            currencies: { revenue: s.currencies.revenue - cost },
+            baseballTiers: s.baseballTiers.map((t, i) => (i === tierIndex ? { ...t, level: nextLevel } : t)),
+            notifications: [...s.notifications, ...newNotifications],
+          }
+        })
+      },
+
+      hireManagerForBaseballTier: (tierId) => {
+        const { baseballTiers, currencies } = get()
+        const tierIndex = baseballTiers.findIndex((t) => t.id === tierId)
+        if (tierIndex === -1) return
+        const tier = baseballTiers[tierIndex]
+        if (!tier.unlocked || tier.managerHired) return
+        const cost = BASEBALL_VENTURE_TIERS[tierIndex].managerHireCost
+        if (currencies.revenue < cost) return
+
+        set((s) => ({
+          currencies: { revenue: s.currencies.revenue - cost },
+          baseballTiers: s.baseballTiers.map((t, i) => (i === tierIndex ? { ...t, managerHired: true } : t)),
+        }))
+      },
+
+      // Unlike soccer's local-game, baseball's own first tier (Tee Time)
+      // does NOT start unlocked (see createInitialBaseballTiers) — so this
+      // is also how a player enters the sport in the first place, following
+      // the exact same locked-card purchase pattern as every other tier
+      // rather than a special "first tier is free" case.
+      unlockBaseballTier: (tierId) => {
+        const { baseballTiers, currencies, legacy } = get()
+        const tierIndex = baseballTiers.findIndex((t) => t.id === tierId)
+        if (tierIndex === -1) return
+        const tier = baseballTiers[tierIndex]
+        if (tier.unlocked) return
+        const cost = Math.round(
+          BASEBALL_VENTURE_TIERS[tierIndex].unlockCost * unlockCostMultiplier(legacy.permanentUpgrades),
+        )
+        if (currencies.revenue < cost) return
+
+        set((s) => ({
+          currencies: { revenue: s.currencies.revenue - cost },
+          baseballTiers: s.baseballTiers.map((t, i) => (i === tierIndex ? { ...t, unlocked: true } : t)),
+        }))
+      },
+
       // Wipes saved progress back to a brand-new player, INCLUDING Legacy —
       // this is the "nuke my save" debug/player button (window.confirm-
       // guarded in the UI), distinct from resetForLegacy() below which
@@ -535,6 +725,12 @@ export const useGameStore = create<GameState>()(
         const freshLegacy = createInitialLegacy()
         set({
           tiers: createInitialTiers(freshLegacy.permanentUpgrades),
+          // Baseball tiers ARE wiped by this full dev/debug reset (unlike
+          // resetForLegacy() below, which deliberately never touches them —
+          // see that action's own doc comment): this button's documented
+          // purpose is a true "brand new player" state, which should mean
+          // every sport, not just soccer.
+          baseballTiers: createInitialBaseballTiers(),
           currencies: { revenue: startingRevenue(freshLegacy.permanentUpgrades) },
           legacy: freshLegacy,
           lifetimeStats: createInitialLifetimeStats(),
@@ -557,6 +753,32 @@ export const useGameStore = create<GameState>()(
       // requires tiers 0-5 all unlocked; after each later prestige reveals
       // one more hidden tier, the same check requires that one unlocked
       // too, forever — no per-stage special-casing needed.
+      //
+      // Deliberately touches ONLY soccer's `tiers` array — `baseballTiers`
+      // itself is untouched, in either direction: baseball tiers are never
+      // checked as part of the gate condition above, AND a successful
+      // soccer prestige never resets any baseball tier's unlocked/level/
+      // managerHired/cumulativeRevenue state.
+      //
+      // IMPORTANT — this independence does NOT extend to the shared
+      // currency, and an earlier version of this comment incorrectly
+      // implied it did (caught by adversarial review). `currencies.revenue`
+      // is ONE global pool spent/earned by both sports (see the
+      // GameState.baseballTiers doc comment) — the `currencies: {
+      // revenue: startingRevenue(...) }` a few lines below unconditionally
+      // resets the WHOLE balance, including whatever fraction of it a
+      // player earned via baseball or was saving toward a baseball tier's
+      // unlock/manager cost. This is an accepted, DISCLOSED consequence of
+      // sharing one currency across sports (a soccer prestige's whole
+      // point is trading away currently-banked wealth for Legacy Points,
+      // and that wealth is the same wallet baseball draws from too) — not
+      // something this action tries to route around, since doing so would
+      // require attributing a fungible, already-pooled-and-partially-spent
+      // balance back to "which sport earned this dollar," which isn't
+      // meaningfully possible without a much larger currency-tracking
+      // redesign out of scope for this validation slice. LegacyPanel.tsx's
+      // confirm dialog explicitly discloses this before the (irreversible)
+      // action, so a player invested in both sports isn't blindsided.
       resetForLegacy: () => {
         const { tiers, legacy } = get()
         if (!allVisibleTiersUnlocked(tiers, legacy.prestigeCount)) return
@@ -661,6 +883,7 @@ export const useGameStore = create<GameState>()(
       partialize: (state) => ({
         schemaVersion: state.schemaVersion,
         tiers: state.tiers,
+        baseballTiers: state.baseballTiers,
         currencies: state.currencies,
         legacy: state.legacy,
         lifetimeStats: state.lifetimeStats,
@@ -710,6 +933,13 @@ export const useGameStore = create<GameState>()(
         merged.notifications = currentState.notifications
         if (!Array.isArray(merged.tiers) || merged.tiers.length !== SOCCER_VENTURE_TIERS.length) {
           merged.tiers = currentState.tiers
+        }
+        // Same never-trust-the-shape guard, extended to baseball's own
+        // tier array now that it exists too — a hand-edited or corrupted
+        // `baseballTiers` gets exactly the same silent-fallback-to-fresh-
+        // defaults treatment as `tiers` above, for the identical reason.
+        if (!Array.isArray(merged.baseballTiers) || merged.baseballTiers.length !== BASEBALL_VENTURE_TIERS.length) {
+          merged.baseballTiers = currentState.baseballTiers
         }
         return merged
       },

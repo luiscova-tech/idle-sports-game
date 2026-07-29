@@ -1,7 +1,9 @@
 import { Link } from 'react-router-dom'
 import { useGameStore } from '../store/useGameStore'
 import { SOCCER_VENTURE_TIERS, revealedTierCount } from '../sports/soccer/soccerModule'
-import VentureCard from '../components/VentureCard'
+import { BASEBALL_VENTURE_TIERS } from '../sports/baseball/baseballModule'
+import SoccerVentureCard from '../components/SoccerVentureCard'
+import BaseballVentureCard from '../components/BaseballVentureCard'
 import LegacyPanel from '../components/LegacyPanel'
 import AchievementsPanel from '../components/AchievementsPanel'
 
@@ -15,7 +17,7 @@ function Home() {
   // — and stay revealed permanently for that save once shown (prestigeCount
   // never decreases on a normal prestige reset, only on the full dev wipe on
   // the Settings page).
-  const visibleTiers = SOCCER_VENTURE_TIERS.slice(0, revealedTierCount(prestigeCount))
+  const visibleSoccerTiers = SOCCER_VENTURE_TIERS.slice(0, revealedTierCount(prestigeCount))
 
   return (
     <div className="app-shell">
@@ -36,9 +38,20 @@ function Home() {
       <LegacyPanel />
       <AchievementsPanel />
 
+      {/* Soccer and baseball tiers share ONE combined list — they share the
+          same Revenue currency and the same visual card language, so they
+          read as one coherent venture portfolio rather than two separate
+          games bolted together (see CLAUDE.md's "Baseball" amendment).
+          Baseball tiers render after soccer's — unlike soccer's reveal
+          mechanic, baseball has no hidden-until-prestige tiers to slice
+          out; entering the sport at all is gated by Tee Time's own locked-
+          card unlock purchase instead. */}
       <div className="venture-list">
-        {visibleTiers.map((config) => (
-          <VentureCard key={config.id} tierId={config.id} />
+        {visibleSoccerTiers.map((config) => (
+          <SoccerVentureCard key={config.id} tierId={config.id} />
+        ))}
+        {BASEBALL_VENTURE_TIERS.map((config) => (
+          <BaseballVentureCard key={config.id} tierId={config.id} />
         ))}
       </div>
     </div>

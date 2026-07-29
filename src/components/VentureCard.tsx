@@ -1,18 +1,15 @@
-import { useGameStore } from '../store/useGameStore'
+import type { ReactNode } from 'react'
+import type { SportModule, MatchOutcome } from '../engine/types'
+import type { VentureTierConfig, VentureTierState } from '../engine/ventureTiers'
+import { isMatchComplete } from '../engine/tickEngine'
 import {
-  SOCCER_VENTURE_TIERS,
-  DEFAULT_SOCCER_CONFIG,
   tierUpgradeCost,
   tierPerTickRevenue,
   trainingEffectMultiplier,
   nextMilestoneLevel,
   previousMilestoneLevel,
-  getOutcome,
-  getPerformanceFactor,
-  matchOutcomeProbabilities,
-} from '../sports/soccer/soccerModule'
+} from '../engine/ventureTiers'
 import { calculateMatchRevenue, expectedMatchRevenue } from '../engine/economy'
-import { unlockCostMultiplier, globalRevenueMultiplier } from '../engine/prestige'
 import './VentureCard.css'
 
 const OUTCOME_LABEL: Record<'win' | 'draw' | 'loss', string> = {
@@ -21,34 +18,102 @@ const OUTCOME_LABEL: Record<'win' | 'draw' | 'loss', string> = {
   loss: 'LOSS',
 }
 
-interface VentureCardProps {
-  tierId: string
+/** The minimum shape any sport's match state must have for this card to
+ *  render generically — score is common to every sport currently plugged
+ *  in, and opponentLevel/elapsedTicks are the two fields the win-
+ *  probability/expected-value preview and the pre-tick gate need. Anything
+ *  MORE specific than this (soccer's minute clock, baseball's inning/half/
+ *  outs) is rendered via the `formatMatchClock` prop instead, so this file
+ *  itself never needs to say "goal" or "inning" — see soccerModule.ts's/
+ *  baseballModule.ts's own top-of-file comments for that rule. */
+interface MatchStateEssentials {
+  elapsedTicks: number
+  opponentLevel?: number
+  homeScore: number
+  awayScore: number
 }
 
-// One card per venture tier. Locked tiers show what's needed to unlock;
-// unlocked tiers show their own independent match/level/manager state and
-// controls — no cross-tier logic here, each card only reads/acts on its
-// own tierId. Markup/CSS only below reflects card state (unlocked vs.
-// locked-affordable vs. locked-far) — no store/logic changes.
-function VentureCard({ tierId }: VentureCardProps) {
-  const tierIndex = SOCCER_VENTURE_TIERS.findIndex((c) => c.id === tierId)
-  const config = SOCCER_VENTURE_TIERS[tierIndex]
-  const tier = useGameStore((s) => s.tiers[tierIndex])
-  const revenue = useGameStore((s) => s.currencies.revenue)
-  const legacy = useGameStore((s) => s.legacy)
-  const tickTier = useGameStore((s) => s.tickTier)
-  const upgradeTier = useGameStore((s) => s.upgradeTier)
-  const hireManagerForTier = useGameStore((s) => s.hireManagerForTier)
-  const unlockTier = useGameStore((s) => s.unlockTier)
+interface VentureCardProps<TState extends MatchStateEssentials> {
+  tierId: string
+  config: VentureTierConfig
+  tier: VentureTierState<TState>
+  sportModule: SportModule<TState>
+  revenue: number
+  legacyUnlockMultiplier: number
+  legacyRevenueMultiplier: number
+  onTick: () => void
+  onUpgrade: () => void
+  onHireManager: () => void
+  onUnlock: () => void
+  /** Sport-specific "what's happening right now" text next to the score —
+   *  soccer's running minute clock, baseball's inning/half/outs. The only
+   *  place a sport's own vocabulary is allowed to leak into this otherwise
+   *  fully generic card. */
+  formatMatchClock: (match: TState) => string
+  /** The manual per-tick action's button label ("Push the Attack" for
+   *  soccer, a baseball-flavored equivalent for baseball) and the short
+   *  caption under it describing what one tick is worth. */
+  actionLabel: string
+  perTickCaptionSuffix: string
+  /**
+   * This sport's OWN win/draw/loss probability distribution for a given
+   * (playerLevel, opponentLevel) pair — used ONLY for the in-progress
+   * "Expected payout" preview below. Deliberately a PROP, not a hardcoded
+   * import of soccer's own matchOutcomeProbabilities: an earlier version of
+   * this card imported that function directly, which is only correct for a
+   * sport whose real resolution ALSO draws from the with-draw distribution.
+   * Baseball has no draw state (resolveMatchOutcomeWithoutDraw,
+   * baseballModule.ts) — feeding its match into the WITH-draw formula
+   * produced a systematically wrong (understated) expected value for every
+   * in-progress baseball match, caught by adversarial review. Each sport's
+   * adapter (SoccerVentureCard/BaseballVentureCard) now supplies the exact
+   * distribution ITS OWN tick()/getOutcome() actually resolves from, so
+   * this generic card can never again silently assume one sport's
+   * resolution shape for another.
+   */
+  computeOutcomeProbabilities: (playerLevel: number, opponentLevel: number) => Record<MatchOutcome, number>
+  /**
+   * Rough estimate of this SPECIFIC tier's expected ticks-to-complete, used
+   * only to size the progress bar. Defaults to `sportModule.ticksPerMatch`
+   * when omitted — correct for soccer (one fixed length for every tier) but
+   * NOT for baseball, where a fixed module-level estimate calibrated
+   * against one tier's inning count (see BASEBALL_ESTIMATED_TICKS_PER_MATCH)
+   * made the progress bar read as barely-half-done at completion for the
+   * shortest tier, or pinned at a false 100% for the last ~15% of the
+   * longest tier's real duration (caught by adversarial review). Baseball's
+   * adapter passes a real per-tier estimate instead.
+   */
+  estimatedTicksPerMatch?: number
+}
 
-  // Mirrors the exact rounding unlockTier()/tickTier() apply in the store,
-  // so a Legacy "Veteran Discount"/"Revenue Boost" purchase is reflected
-  // here the instant it's bought — never a display that could drift from
-  // what the store actually charges/grants (same principle as the
-  // match-projected-payout preview below).
-  const legacyUnlockMultiplier = unlockCostMultiplier(legacy.permanentUpgrades)
-  const legacyRevenueMultiplier = globalRevenueMultiplier(legacy.permanentUpgrades)
-
+// One card per venture tier, generic over ANY sport's SportModule<TState> —
+// see CLAUDE.md's "Baseball" amendment (Build Order step 3: "second sport
+// as a plugged-in module, validates engine abstraction"). Locked tiers show
+// what's needed to unlock; unlocked tiers show their own independent
+// match/level/manager state and controls — no cross-tier logic here, each
+// card only reads/acts on its own tierId. All store access happens in the
+// caller (Home.tsx) via the onTick/onUpgrade/onHireManager/onUnlock props —
+// this file has zero direct useGameStore coupling, so it has no idea
+// whether it's rendering a soccer tier or a baseball one beyond what its
+// props tell it.
+function VentureCard<TState extends MatchStateEssentials>({
+  tierId,
+  config,
+  tier,
+  sportModule,
+  revenue,
+  legacyUnlockMultiplier,
+  legacyRevenueMultiplier,
+  onTick,
+  onUpgrade,
+  onHireManager,
+  onUnlock,
+  formatMatchClock,
+  actionLabel,
+  perTickCaptionSuffix,
+  computeOutcomeProbabilities,
+  estimatedTicksPerMatch,
+}: VentureCardProps<TState>): ReactNode {
   if (!tier.unlocked) {
     const unlockCost = Math.round(config.unlockCost * legacyUnlockMultiplier)
     const unlockAffordable = revenue >= unlockCost
@@ -78,12 +143,7 @@ function VentureCard({ tierId }: VentureCardProps) {
             style={{ width: `${unlockProgressPercent}%` }}
           />
         </div>
-        <button
-          type="button"
-          className="btn btn--unlock"
-          onClick={() => unlockTier(tierId)}
-          disabled={!unlockAffordable}
-        >
+        <button type="button" className="btn btn--unlock" onClick={onUnlock} disabled={!unlockAffordable}>
           Unlock {config.name} ({Math.min(revenue, unlockCost)}/{unlockCost} Revenue)
         </button>
       </div>
@@ -108,68 +168,27 @@ function VentureCard({ tierId }: VentureCardProps) {
     : 100
 
   // Purely presentational: derived from state already in the store, using
-  // the exact same getOutcome()/getPerformanceFactor()/calculateMatchRevenue()
-  // the engine uses at real match completion — never a separate formula
-  // that could drift. Once this match's first tick has run, its outcome is
-  // already resolved (see soccerModule.ts's resolveMatchOutcome) and these
-  // two calls just read that back out — no store/economy logic changes; the
-  // actual payout still only lands when the match genuinely completes.
-  //
-  // `currentOutcome` is the SINGLE authoritative read of this tier's
-  // CURRENT (in-progress or freshly-started) match's outcome — every place
-  // in this card that displays "what's this match's outcome" (the live pill
-  // next to the score, and the projection line) reads this exact same
-  // value, never a second independent computation. Before this fix, the
-  // pill next to the score instead showed `tier.lastOutcome` — the
-  // PREVIOUS match's cached result, a genuinely different value from a
-  // genuinely different match, displayed immediately adjacent to the
-  // CURRENT match's live score. That's not a bug in either value
-  // individually (both were internally correct for what they represented),
-  // but showing them side by side, with nothing distinguishing "last
-  // match's result" from "this match's live status," read as an
-  // inconsistency to a player watching the score. `tier.lastOutcome` is
-  // still shown below (see the stats row) — clearly labeled as history,
-  // not live status.
-  const progressPercent = Math.round(
-    (tier.match.elapsedTicks / DEFAULT_SOCCER_CONFIG.ticksPerMatch) * 100,
+  // the exact same sportModule.getOutcome()/getPerformanceFactor()/
+  // calculateMatchRevenue() the engine uses at real match completion —
+  // never a separate formula that could drift. `currentOutcome` is the
+  // SINGLE authoritative read of this tier's CURRENT match's outcome, used
+  // everywhere this card displays "what's this match's outcome" (see
+  // CLAUDE.md's "Outcome-display consolidation" amendment for the bug this
+  // prevents).
+  const progressPercent = Math.min(
+    100,
+    Math.round((tier.match.elapsedTicks / (estimatedTicksPerMatch ?? sportModule.ticksPerMatch)) * 100),
   )
-  // A freshly-reset match (elapsedTicks === 0, right after completion or a
-  // brand-new unlock) has no resolved outcome yet, and getOutcome()'s
-  // fallback for that case (tie-break on a 0-0 raw score) resolves to
-  // 'draw' — correct as a fallback for a genuinely-unresolvable state, but
-  // actively misleading if shown as a live result for a match that hasn't
-  // had a single tick, adversarially found to flash a spurious "DRAW" badge
-  // (with a real-looking flat-draw payout projection) on every single
-  // match completion and every fresh tier unlock. matchStarted gates the
-  // projection line's payout number (still meaningful pre-resolution-word,
-  // see below); the actual live outcome WORD is gated separately by
-  // matchComplete (display-timing only — see next comment).
   const matchStarted = tier.match.elapsedTicks > 0
-  // Display-timing only: the OUTCOME WORD (WIN/DRAW/LOSS) is deliberately
-  // withheld until the match has actually run its full length, even though
-  // the underlying result is already decided at kickoff (resolvedOutcome,
-  // resolved on tick 0 — see soccerModule.ts). This does NOT change what's
-  // computed/stored anywhere; `currentOutcome`/`currentPerformanceFactor`
-  // below are still the single, authoritative read used everywhere a word
-  // or number is shown — matchComplete only gates whether the WORD is
-  // rendered, never a second/divergent computation of it.
-  //
-  // Note: because tickTier() (useGameStore.ts) resets a tier's match to
-  // createInitialState() in the SAME set() call that finalizes a completed
-  // match (the finishing tick's own elapsedTicks===ticksPerMatch state is
-  // only ever used transiently, to compute the outcome/payout, and is never
-  // itself written into the store), a rendered frame with
-  // elapsedTicks===ticksPerMatch essentially never occurs in live play — a
-  // match's visible elapsedTicks jumps straight from ticksPerMatch-1 to a
-  // fresh 0. matchComplete is still computed correctly here (rather than
-  // hardcoded false) so the word displays correctly if that ever changes,
-  // but in today's UI its practical effect is "the live word never shows
-  // during this match" — the just-finished result remains visible via the
-  // separate, always-on "Last Result" stat below (tier.lastOutcome),
-  // exactly as before this change.
-  const matchComplete = tier.match.elapsedTicks >= DEFAULT_SOCCER_CONFIG.ticksPerMatch
-  const currentOutcome = getOutcome(tier.match)
-  const currentPerformanceFactor = getPerformanceFactor(tier.match)
+  // The single shared completion check (engine/tickEngine.ts) — correctly
+  // authoritative whether this sport has a fixed ticksPerMatch (soccer) or
+  // a genuinely variable match length driven by its own isMatchComplete
+  // (baseball, see engine/types.ts's SportModule.isMatchComplete and
+  // CLAUDE.md's "Baseball" amendment) — never a second, UI-only copy of
+  // "is this match over" logic.
+  const matchComplete = isMatchComplete(sportModule, tier.tickIndex, tier.match)
+  const currentOutcome = sportModule.getOutcome(tier.match)
+  const currentPerformanceFactor = sportModule.getPerformanceFactor(tier.match)
   const projectedPayout = Math.round(
     calculateMatchRevenue(currentOutcome, currentPerformanceFactor) *
       config.baseRevenueMultiplier *
@@ -177,41 +196,18 @@ function VentureCard({ tierId }: VentureCardProps) {
       legacyRevenueMultiplier,
   )
 
-  // IN-PROGRESS payout preview only (used below when matchStarted &&
-  // !matchComplete) — deliberately NOT derived from currentOutcome/
-  // currentPerformanceFactor above, unlike projectedPayout. Those two are
-  // reads of this match's ALREADY-RESOLVED result (see soccerModule.ts's
-  // resolveMatchOutcome, decided once at kickoff) — showing a number built
-  // from them, even with the outcome WORD hidden, would let a sharp player
-  // infer the real result from the number alone (e.g. it jumping to the
-  // flat loss payout the instant the match starts). expectedPayout instead
-  // is a genuine expected value over the three possible outcomes, computed
-  // ONLY from information already visible before resolution ever mattered:
-  // this tier's CURRENT training level (tier.level, read live — reflects a
-  // mid-match "Improve Training" purchase immediately) and this match's
-  // OWN already-drawn opponent level (tier.match.opponentLevel, the exact
-  // number already shown by the "Facing a Level N opponent" line below —
-  // reusing it here reveals nothing new). matchOutcomeProbabilities/
-  // expectedMatchRevenue are pure functions of those inputs alone — they
-  // never read resolvedOutcome/resolvedMargin/homeScore/awayScore — so by
-  // construction this number is IDENTICAL for every match with the same
-  // level/opponent, no matter what that match actually rolls. See
-  // CLAUDE.md for the verification proving this (many matches, same
-  // inputs, provably identical expected-payout output regardless of the
-  // real resolved outcome).
-  //
-  // Falls back to projectedPayout only in the one case where an opponent
-  // level was never drawn at all: a match already mid-flight under the OLD
-  // pre-probability-model schema (persisted before that model existed,
-  // gated on tickIndex===0 in tick() — see the fourteenth amendment). Such
-  // a match has no "hidden resolved outcome" to leak in the first place —
-  // its result is just whatever its live score currently is — so there's
-  // no downside to showing its real live projection instead of an
-  // expected value there's no opponent level to compute one from.
+  // IN-PROGRESS payout preview only — deliberately NOT derived from
+  // currentOutcome/currentPerformanceFactor above (this match's ALREADY-
+  // RESOLVED result). A genuine expected value over the three possible
+  // outcomes instead, computed ONLY from this tier's CURRENT training
+  // level and this match's OWN already-drawn opponent level — see
+  // CLAUDE.md for the full "impossible to correlate with the real outcome"
+  // verification. Falls back to projectedPayout only when opponentLevel was
+  // never drawn (a legacy pre-migration match with no such concept).
   const expectedPayout =
     tier.match.opponentLevel !== undefined
       ? Math.round(
-          expectedMatchRevenue(matchOutcomeProbabilities(tier.level, tier.match.opponentLevel)) *
+          expectedMatchRevenue(computeOutcomeProbabilities(tier.level, tier.match.opponentLevel)) *
             config.baseRevenueMultiplier *
             trainingEffectMultiplier(tier.level) *
             legacyRevenueMultiplier,
@@ -232,7 +228,7 @@ function VentureCard({ tierId }: VentureCardProps) {
 
       <div className="venture-card__score">
         {tier.match.homeScore} - {tier.match.awayScore}
-        <span className="venture-card__clock">{tier.match.elapsedTicks}'</span>
+        <span className="venture-card__clock">{formatMatchClock(tier.match)}</span>
         {matchComplete && (
           <span className={`venture-card__outcome-badge venture-card__outcome-badge--${currentOutcome}`}>
             {OUTCOME_LABEL[currentOutcome]}
@@ -243,22 +239,11 @@ function VentureCard({ tierId }: VentureCardProps) {
       <div className="venture-card__progress-track">
         <div className="venture-card__progress-fill" style={{ width: `${progressPercent}%` }} />
       </div>
-      {/* A payout NUMBER stays visible throughout — it has real decision
-          value when managing several auto-playing tiers at once — but the
-          outcome WORD is withheld until matchComplete (see above). Three
-          states:
-            - not yet started: no number to show yet (kickoff pending) —
-              reads as "N/A", not a possibly-misleading number derived from
-              the pre-resolution fallback outcome.
-            - in progress: expectedPayout (see its own doc comment above) —
-              a genuine expected value that cannot correlate with the
-              already-resolved outcome, labeled "Expected" (not
-              "Projected") and prefixed with "~" so it reads honestly as an
-              estimate rather than a resolved number.
-            - complete: unchanged from before this session — the real
-              resolved word + projectedPayout (the actual payout this match
-              will pay), both from the single currentOutcome/
-              currentPerformanceFactor source, never a second/divergent one. */}
+      {/* A payout NUMBER stays visible throughout — real decision value
+          when managing several auto-playing tiers at once — but the
+          outcome WORD is withheld until matchComplete. Three states: not
+          started (kickoff pending, no number), in progress (expectedPayout,
+          no word), complete (the real resolved word + projectedPayout). */}
       {!matchStarted ? (
         <p className="venture-card__projection">Projected payout: N/A — kickoff pending</p>
       ) : matchComplete ? (
@@ -299,15 +284,17 @@ function VentureCard({ tierId }: VentureCardProps) {
       </div>
 
       <div className="venture-card__actions">
-        <button type="button" className="btn btn--primary" onClick={() => tickTier(tierId)}>
-          Push the Attack
+        <button type="button" className="btn btn--primary" onClick={onTick}>
+          {actionLabel}
         </button>
-        <p className="venture-card__per-push">+{perTickRevenue} Revenue per push</p>
+        <p className="venture-card__per-push">
+          +{perTickRevenue} Revenue {perTickCaptionSuffix}
+        </p>
 
         <button
           type="button"
           className="btn btn--purchase"
-          onClick={() => upgradeTier(tierId)}
+          onClick={onUpgrade}
           disabled={revenue < upgradeCost}
         >
           Improve Training ({Math.min(revenue, upgradeCost)}/{upgradeCost} Revenue)
@@ -332,7 +319,7 @@ function VentureCard({ tierId }: VentureCardProps) {
           <button
             type="button"
             className="btn btn--purchase"
-            onClick={() => hireManagerForTier(tierId)}
+            onClick={onHireManager}
             disabled={revenue < config.managerHireCost}
           >
             Hire a Manager ({Math.min(revenue, config.managerHireCost)}/{config.managerHireCost} Revenue)

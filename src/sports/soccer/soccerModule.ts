@@ -5,6 +5,8 @@
 // ============================================================
 
 import type { SportModule, TickResult, MatchOutcome, MatchContext } from '../../engine/types'
+import { resolveMatchOutcome } from '../../engine/winProbability'
+import type { VentureTierConfig } from '../../engine/ventureTiers'
 
 /** Soccer's opaque per-match state, as seen by the engine.
  *
@@ -53,81 +55,23 @@ export const DEFAULT_SOCCER_CONFIG: SoccerConfig = {
   awayConversionRate: 0.26,
 }
 
-/** Tick interval, in milliseconds, tuned so a full match resolves in well
- *  under a couple of minutes of real time. */
-export const SOCCER_TICK_INTERVAL_MS = 600
-
 function createInitialState(): SoccerMatchState {
   return { homeScore: 0, awayScore: 0, elapsedTicks: 0 }
 }
 
 /**
  * Continuous, opponent-level-based win probability — supersedes the earlier
- * hard "minimum training level to win" cliff entirely (see CLAUDE.md). Both
- * constants are used LITERALLY (not as an emergent approximation from
- * modulated per-tick rates — an earlier draft tried that and found it
- * fragile: compounding a per-tick bias over 90 independent ticks amplifies
- * it far past the intended per-match sensitivity, and hitting a precise
- * target curve that way required constant-hunting with no clean closed
- * form). Instead, the outcome is resolved by ONE direct roll against this
- * exact formula, once per match (see `tick()` below) — S=4 exactly
- * reproduces the validated anchor point (a 3-level gap -> ~15.1% win
- * chance) by construction, not by simulation-fitting.
+ * hard "minimum training level to win" cliff entirely (see CLAUDE.md). The
+ * outcome is resolved by ONE direct roll (see `resolveMatchOutcome`, now
+ * hoisted to the sport-agnostic src/engine/winProbability.ts — nothing
+ * about the formula is soccer-specific, it only ever consumes two plain
+ * numeric levels) against that exact formula, once per match (see `tick()`
+ * below). See winProbability.ts for the full formula/derivation writeup and
+ * CLAUDE.md's "Baseball" amendment for why this was hoisted: baseball
+ * needed the exact same math, and reimplementing it would have reintroduced
+ * exactly the "two copies of the same formula silently drift apart" bug
+ * class this project has already been bitten by more than once.
  */
-const GAP_PROBABILITY_SCALE = 4
-
-/**
- * How much of the non-win probability mass becomes a draw (the rest is a
- * loss), as a fraction of `closeness * (1 - pWin)`, where `closeness =
- * 4 * pWin * (1 - pWin)` peaks at 1 when the match is dead-even (pWin=0.5)
- * and tapers to 0 at extreme mismatches — real sports draws are commonest
- * in close matchups and rare in blowouts, in either direction. This is
- * "your call" territory (the brief only pins down P(win) itself): 0.5 gives
- * a 25%/25% draw/loss split at a perfectly even matchup (close to the old
- * flat model's ~20% draw rate) tapering smoothly to near-0% draws at large
- * mismatches, matched against pWin/pLoss via simulation (see CLAUDE.md).
- * Chosen so pDraw can mathematically never exceed `1 - pWin`, at any pWin —
- * no clamping needed, safe by construction. */
-const DRAW_WEIGHT = 0.5
-
-/**
- * The pure win/draw/loss probability triple for a given player/opponent
- * level gap — exactly the formula resolveMatchOutcome below rolls a real
- * match's outcome against, factored out into its own function so a caller
- * that needs the PROBABILITIES themselves (not a random draw) reads from
- * this exact same math rather than a second, separately-maintained copy.
- *
- * This exists specifically for VentureCard.tsx's in-progress expected-value
- * payout preview (see calculateMatchRevenue/expectedMatchRevenue in
- * economy.ts): that preview needs P(win)/P(draw)/P(loss) for the CURRENT
- * player level and this match's ALREADY-DRAWN opponent level, without ever
- * touching resolvedOutcome/resolvedMargin — reusing this function (rather
- * than reimplementing the curve) is what makes it structurally impossible
- * for that preview's math to silently drift from what actually decides a
- * match, the exact bug class (two copies of the same formula diverging)
- * this project has been bitten by more than once (see CLAUDE.md).
- */
-export function matchOutcomeProbabilities(
-  playerLevel: number,
-  opponentLevel: number,
-): Record<MatchOutcome, number> {
-  const gap = opponentLevel - playerLevel
-  const pWin = 1 / (1 + 10 ** (gap / GAP_PROBABILITY_SCALE))
-  const closeness = 4 * pWin * (1 - pWin)
-  const pDraw = DRAW_WEIGHT * closeness * (1 - pWin)
-  return { win: pWin, draw: pDraw, loss: 1 - pWin - pDraw }
-}
-
-/** Draws this match's opponent level from `range` and resolves the outcome
- *  via the gap-driven probability model above, in one shot. Called exactly
- *  once per match (at its first tick — see `tick()`), never re-rolled. */
-function resolveMatchOutcome(playerLevel: number, opponentLevel: number): MatchOutcome {
-  const { win, draw } = matchOutcomeProbabilities(playerLevel, opponentLevel)
-  const roll = Math.random()
-  if (roll < win) return 'win'
-  if (roll < win + draw) return 'draw'
-  return 'loss'
-}
 
 /** How many attempts drawResolvedMargin below makes before giving up and
  *  falling back to the smallest margin consistent with the category. Real
@@ -446,29 +390,11 @@ export function createSoccerModule(
  * only file allowed to name soccer competition tiers) rather than in the
  * store. A second sport (step 3) defines its own tier list the same way.
  */
-export interface SoccerVentureTierConfig {
-  id: string
-  name: string
-  /** Placeholder tier art — a single emoji, standing in for real
-   *  AI-generated icon/sprite art (step 9). Chosen to track this ladder's
-   *  grounded -> epic -> absurd tone arc from tier 1 to tier 11. */
-  icon: string
-  /** Multiplier applied to economy.ts's base outcome revenue at upgrade level 1. */
-  baseRevenueMultiplier: number
-  /** Revenue cost to unlock this tier, paid from the player's current
-   *  spendable balance (same pool as Improve Training/Hire a Manager) —
-   *  a deliberate player choice, not an automatic threshold. Ignored for
-   *  the first tier, which starts unlocked. */
-  unlockCost: number
-  /** One-time Revenue cost to unlock auto-play for this tier. */
-  managerHireCost: number
-  /** Cost of this tier's first "Improve Training" upgrade (level 1 -> 2). */
-  upgradeBaseCost: number
-  /** Per-level cost growth rate — a mild exponential curve. */
-  upgradeCostGrowth: number
-}
-
-export const SOCCER_VENTURE_TIERS: SoccerVentureTierConfig[] = [
+// VentureTierConfig (id/name/icon/baseRevenueMultiplier/unlockCost/
+// managerHireCost/upgradeBaseCost/upgradeCostGrowth) is the shared,
+// sport-agnostic tier-config shape — see engine/ventureTiers.ts. Nothing in
+// that shape is soccer-specific; only the DATA below is.
+export const SOCCER_VENTURE_TIERS: VentureTierConfig[] = [
   {
     id: 'local-game',
     name: 'The Sunday League',
@@ -692,137 +618,13 @@ export function allVisibleTiersUnlocked(
   return tiers.slice(0, visibleCount).every((t) => t.unlocked)
 }
 
-/** Revenue cost to raise a tier currently at `currentLevel` to the next level. */
-export function tierUpgradeCost(config: SoccerVentureTierConfig, currentLevel: number): number {
-  return Math.round(config.upgradeBaseCost * config.upgradeCostGrowth ** (currentLevel - 1))
-}
-
-/**
- * Compounding-doubling "Improve Training" milestones. Crossing a level in
- * this list DOUBLES the cumulative training effect from that point forward
- * (stacking: crossing N milestones multiplies by 2^N) — not a flat lookup
- * table, an actual running multiplier, so the boost from an earlier
- * milestone is still there when a later one is crossed.
- *
- * Levels (and their widening gaps: 7, 9, 12, 16, 20, 25, 30, 35, 40) were
- * derived by simulating this game's REAL per-tier cost/revenue curves (see
- * CLAUDE.md "Milestone multipliers" for the full derivation), not chosen as
- * round numbers: without any milestone boost, this economy's exponential
- * upgradeCostGrowth (1.6-2.05x per level) against linear-in-level revenue
- * means the level-up cadence itself grows ~g times slower every level, so a
- * fixed absolute level number becomes many-days-then-effectively-unreachable
- * within a few dozen levels at every tier, regardless of that tier's own
- * baseRevenueMultiplier (which only shifts the wall by a few levels, since
- * it's a constant factor against an exponential). The doubling exists
- * specifically to keep pushing that wall back out. Early milestones (6, 13,
- * 22) land within single-digit minutes to about an hour of dedicated
- * training investment at any tier; by design (matching Cookie Clicker's own
- * high-count building milestones) the later ones (125+) are long-horizon,
- * many-real-days goals for only the most dedicated single-tier grinding —
- * not something an average session is expected to reach. */
-export const TRAINING_MILESTONE_LEVELS = [6, 13, 22, 34, 50, 70, 95, 125, 160, 200]
-
-/** The actual training-driven revenue multiplier at a given "Improve
- *  Training" level — `level` scaled linearly as before, times 2 for every
- *  milestone in TRAINING_MILESTONE_LEVELS that level has reached or passed.
- *  Used everywhere a tier's level currently scales revenue (per-tick,
- *  match-completion bonus) — see tierPerTickRevenue below and
- *  useGameStore.ts's completion-bonus calculation. Does NOT affect
- *  tierUpgradeCost, which stays keyed on the raw level exactly as before —
- *  only the revenue side of training gets the milestone boost. */
-export function trainingEffectMultiplier(level: number): number {
-  let milestonesPassed = 0
-  for (const milestone of TRAINING_MILESTONE_LEVELS) {
-    if (level >= milestone) milestonesPassed += 1
-  }
-  return level * 2 ** milestonesPassed
-}
-
-/** The next not-yet-reached milestone level above `level`, or `null` once
- *  every milestone in TRAINING_MILESTONE_LEVELS has been passed. Exported
- *  so the UI can show a compact "next: 2x at Level N" indicator without
- *  duplicating TRAINING_MILESTONE_LEVELS' shape — every milestone crossing
- *  doubles the CURRENT cumulative effect, so "2x" is always the correct
- *  framing for the next one, regardless of how many have already passed. */
-export function nextMilestoneLevel(level: number): number | null {
-  return TRAINING_MILESTONE_LEVELS.find((milestone) => level < milestone) ?? null
-}
-
-/** The largest already-crossed milestone at or below `level`, or `1` (the
- *  starting level every tier's training begins at) if none have been
- *  crossed yet. Paired with nextMilestoneLevel() so the UI can show
- *  progress SINCE the previous milestone rather than the raw level over the
- *  next one — the latter looks right only for the very first milestone (no
- *  earlier one to net out against) and is misleadingly pre-filled for every
- *  milestone after that (e.g. right after crossing to level 13, naively
- *  showing `13/22` reads as 59% progress toward the NEXT doubling, despite
- *  zero levels having been trained since the crossing that just happened). */
-export function previousMilestoneLevel(level: number): number {
-  let previous = 1
-  for (const milestone of TRAINING_MILESTONE_LEVELS) {
-    if (level >= milestone) previous = milestone
-  }
-  return previous
-}
-
-/**
- * The [min, max] level range this tier's per-match opponent is drawn from
- * (see MatchContext.opponentLevelRange in engine/types.ts and
- * resolveMatchOutcome above) — supersedes the earlier flat `minWinLevel`
- * hard cliff entirely (see CLAUDE.md). Centered on the exact same
- * `tierIndex + 1` anchor the old cliff used (1 for tier 0, up to 11 for The
- * Multiverse Cup) — that number was already simulated last session against
- * this game's real cost/revenue curves to land within single-digit-minutes
- * of dedicated play at low tiers and a genuine-but-never-impossible few-
- * hours-to-low-days investment at the top tier, and centering the new range
- * on it preserves that calibration rather than re-deriving it from scratch.
- * What changes is the shape: instead of "below this level, a win is
- * impossible," a fixed ±2 spread around that center means EVERY match
- * draws a slightly different opponent, and — combined with the continuous
- * probability curve — even a tier a player has just reached (level 1) has a
- * real, nonzero (if small) chance to win immediately, with the odds
- * smoothly improving as training catches up to the range's center, rather
- * than flipping from "impossible" to "normal" at one specific level. */
-export function opponentLevelRangeForTier(tierIndex: number): { min: number; max: number } {
-  const center = tierIndex + 1
-  return { min: Math.max(1, center - 2), max: center + 2 }
-}
-
-/** Real-world milliseconds between auto-play ticks for the tier at
- *  `tierIndex` — ONLY consumed by the idle auto-tick interval
- *  (useMatchTicker.ts); a manual "Push the Attack" click always resolves a
- *  tick instantly regardless of tier, by construction (it calls tickTier()
- *  directly, never through this interval). Match length stays a fixed 90
- *  ticks at every tier (unchanged) — this only stretches how long an
- *  automated manager takes to grind through those 90 ticks. Geometric
- *  growth from the pre-existing 600ms base (tier 0's pacing is completely
- *  unchanged from before this session, preserving all of its prior
- *  playtesting/balance), at a fixed 1.4x per tier: tier 0 stays a ~54s
- *  auto-match, climbing to a ~26-minute auto-match at tier 10 (The
- *  Multiverse Cup) — a ~29x spread top to bottom. Chosen so the highest
- *  tiers feel meaningfully more "epic"/slow on auto-play (rewarding active
- *  manual clicking, or patience) without making any tier's automation take
- *  implausibly long (hours+) per match. */
-export const BASE_AUTO_TICK_INTERVAL_MS = SOCCER_TICK_INTERVAL_MS
-const AUTO_TICK_INTERVAL_GROWTH_PER_TIER = 1.4
-
-export function autoTickIntervalMsForTier(tierIndex: number): number {
-  return Math.round(BASE_AUTO_TICK_INTERVAL_MS * AUTO_TICK_INTERVAL_GROWTH_PER_TIER ** tierIndex)
-}
-
-/** Base direct Revenue granted per tick (manual click or automated) at
- *  multiplier=1, level=1, before tier/level scaling. Tuned so a brand-new
- *  Local Game player reaches their first affordable purchase (Improve
- *  Training, cost 100) in ~25s at an assumed 1 click/sec manual pace. */
-export const BASE_PER_TICK_REVENUE = 4
-
-/** Direct Revenue granted for a single tick at this tier/level — the
- *  "clicking is the primary generator" amount, added every tick (manual or
- *  auto) on top of the existing match-completion bonus. Scales by the same
- *  baseRevenueMultiplier * trainingEffectMultiplier(level) factor the
- *  completion bonus already uses (see useGameStore.ts), so relative
- *  tier/level progression — including milestone doublings — stays
- *  consistent between the two. */
-export function tierPerTickRevenue(config: SoccerVentureTierConfig, level: number): number {
-  return Math.round(BASE_PER_TICK_REVENUE * config.baseRevenueMultiplier * trainingEffectMultiplier(level))
-}
+// tierUpgradeCost, TRAINING_MILESTONE_LEVELS/trainingEffectMultiplier/
+// nextMilestoneLevel/previousMilestoneLevel, opponentLevelRangeForTier,
+// autoTickIntervalMsForTier, and tierPerTickRevenue all moved to the
+// shared, sport-agnostic src/engine/ventureTiers.ts — none of these
+// formulas have ever had anything soccer-specific about them (they only
+// ever consume a generic VentureTierConfig + a numeric level/tierIndex),
+// so baseball reuses them directly rather than reimplementing byte-
+// identical math under a new name. Every store/UI call site that used to
+// import these BY NAME from this file now imports them from
+// engine/ventureTiers.ts instead. See CLAUDE.md's "Baseball" amendment.
