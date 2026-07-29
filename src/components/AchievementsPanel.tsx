@@ -14,17 +14,29 @@ const TIER_BADGE_CLASS: Record<string, string> = {
   Gold: 'achievement-badge--gold',
 }
 
-// Exhaustive over AchievementReward['type'] — adding a third reward
-// variant without updating this switch is a compile error, not a silently
+// An if/else chain, not a `switch` — see assertNeverRewardType's own doc
+// comment (engine/achievements.ts) for why: a verified quirk in this
+// project's exact TypeScript/tsconfig combination fails to narrow a
+// 3+-variant discriminated union's discriminant to `never` in a switch's
+// `default` branch, even though the identical union narrows correctly
+// through an if/else chain. Still fully exhaustive — adding a fourth reward
+// variant without updating this chain is a compile error, not a silently
 // wrong "+N Legacy Points" label for a reward that isn't Legacy Points.
 function rewardLabel(reward: AchievementReward): string {
-  switch (reward.type) {
-    case 'revenue':
-      return `+${reward.amount} Revenue`
-    case 'legacyPoints':
-      return `+${reward.amount} Legacy Points`
-    default:
-      return assertNeverRewardType(reward.type)
+  if (reward.type === 'revenue') {
+    return `+${reward.amount} Revenue`
+  } else if (reward.type === 'legacyPoints') {
+    return `+${reward.amount} Legacy Points`
+  } else if (reward.type === 'scaledRevenue') {
+    // The exact Revenue amount can't be shown ahead of time — it's
+    // computed fresh from the player's OWN current income rate at the
+    // moment of completion (see CLAUDE.md's income-rate-scaled-rewards
+    // amendment), so showing a stale precomputed number here would
+    // misrepresent it. Describing the TIME quantity instead stays honest
+    // and legible regardless of how large a player's economy has grown.
+    return `~${reward.incomeRateSeconds}s of current income`
+  } else {
+    return assertNeverRewardType(reward)
   }
 }
 

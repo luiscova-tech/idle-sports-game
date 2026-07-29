@@ -18,7 +18,9 @@ import {
   opponentLevelRangeForTier,
   TRAINING_MILESTONE_LEVELS,
   resolveVentureTierTick,
+  tierIncomeRatePerSecond,
 } from '../engine/ventureTiers'
+import { matchOutcomeProbabilities, matchOutcomeProbabilitiesWithoutDrawTriple } from '../engine/winProbability'
 import {
   createSoccerModule,
   type SoccerMatchState,
@@ -31,6 +33,7 @@ import {
   type BaseballMatchState,
   BASEBALL_VENTURE_TIERS,
   inningsForBaseballTier,
+  estimatedTicksForBaseballTier,
 } from '../sports/baseball/baseballModule'
 
 // Single module-scoped instance of each currently plugged-in sport. Every
@@ -184,6 +187,61 @@ function createInitialAchievements(): AchievementsState {
   return { earnedIds: [] }
 }
 
+/**
+ * The player's CURRENT aggregate income rate (expected Revenue/second),
+ * summed across every currently unlocked+managed tier in BOTH sports at
+ * their live levels, with the live Legacy `globalRevenueMultiplier` applied
+ * — feeds the 'scaledRevenue' achievement reward variant (see
+ * engine/achievements.ts's AchievementReward and CLAUDE.md's income-rate-
+ * scaled-rewards amendment). Reuses `tierIncomeRatePerSecond`
+ * (engine/ventureTiers.ts) per-tier — this function is just the "sum across
+ * every tier of both sports" orchestration, which is inherently a store-
+ * level concern (same reasoning as `LegacyPanel.tsx`'s/`FranchiseTab.tsx`'s
+ * own combined-across-both-sports totals): the sport-agnostic engine layer
+ * has no way to iterate "every sport," only one sport's own tier list at a
+ * time.
+ *
+ * Takes plain `{unlocked, managerHired, level}[]` arrays rather than the
+ * store's own `VentureTier[]`/`BaseballVentureTier[]` types, so this stays
+ * usable from anywhere without a circular-import concern.
+ *
+ * Deliberately NOT memoized or cached anywhere — every call recomputes from
+ * whatever tier/legacy state is passed in, which is what lets the caller
+ * satisfy "computed fresh at the moment of completion, not precomputed
+ * ahead of time": each of tickTier's/tickBaseballTier's `set()` calls below
+ * passes a closure over `s` (the state as of that exact `set()`), so a
+ * reward granted mid-set reflects the economy at that literal instant, not
+ * a stale snapshot from an earlier tick or render.
+ */
+function currentAggregateIncomeRatePerSecond(
+  tiers: { unlocked: boolean; managerHired: boolean; level: number }[],
+  baseballTiers: { unlocked: boolean; managerHired: boolean; level: number }[],
+  legacyMultiplier: number,
+): number {
+  let total = 0
+  for (let i = 0; i < tiers.length; i++) {
+    total += tierIncomeRatePerSecond(
+      tiers[i],
+      i,
+      SOCCER_VENTURE_TIERS[i],
+      legacyMultiplier,
+      matchOutcomeProbabilities,
+      soccerModule.ticksPerMatch,
+    )
+  }
+  for (let i = 0; i < baseballTiers.length; i++) {
+    total += tierIncomeRatePerSecond(
+      baseballTiers[i],
+      i,
+      BASEBALL_VENTURE_TIERS[i],
+      legacyMultiplier,
+      matchOutcomeProbabilitiesWithoutDrawTriple,
+      estimatedTicksForBaseballTier(i),
+    )
+  }
+  return total
+}
+
 /** Checks and grants any achievements that newly qualify given the current
  *  value of every tracked lifetime stat, applying rewards atomically.
  *  Deliberately called from BOTH of tickTier()'s branches below (not just
@@ -195,26 +253,58 @@ function createInitialAchievements(): AchievementsState {
  *  tick's own Revenue) — achievement rewards stack on top of those, never
  *  replace them. A no-op (same `earnedIds`, unchanged totals) whenever
  *  nothing newly qualifies, which is the overwhelmingly common case on any
- *  given tick. */
+ *  given tick.
+ *
+ *  `getIncomeRatePerSecond` is a LAZY thunk, not a pre-computed number —
+ *  `currentAggregateIncomeRatePerSecond` above loops over every tier of
+ *  both sports doing real probability math, and the overwhelming majority
+ *  of ticks earn nothing new at all; computing it unconditionally on every
+ *  single tick (this function already runs on every tick, completion or
+ *  not, per the doc comment above) would be pure waste. Only the
+ *  'scaledRevenue' branch below ever actually calls it, so the cost is paid
+ *  only on the rare tick that actually grants one. */
 function applyEarnedAchievements(
   stats: Record<string, number>,
   earnedIds: readonly string[],
   baseRevenue: number,
   baseLegacyPoints: number,
+  getIncomeRatePerSecond: () => number,
 ): { earnedIds: string[]; revenue: number; legacyPoints: number; grantedCount: number } {
   const newlyEarned = checkNewlyEarnedAchievements(stats, earnedIds)
   let revenue = baseRevenue
   let legacyPoints = baseLegacyPoints
   for (const achievement of newlyEarned) {
-    switch (achievement.reward.type) {
-      case 'revenue':
-        revenue += achievement.reward.amount
-        break
-      case 'legacyPoints':
-        legacyPoints += achievement.reward.amount
-        break
-      default:
-        assertNeverRewardType(achievement.reward.type)
+    // An if/else chain, not a `switch` — see assertNeverRewardType's own
+    // doc comment (engine/achievements.ts) for why: a verified quirk in
+    // this project's exact TypeScript/tsconfig combination fails to narrow
+    // a 3+-variant discriminated union's discriminant to `never` in a
+    // switch's `default` branch, even though the identical union narrows
+    // correctly through an if/else chain.
+    const { reward } = achievement
+    if (reward.type === 'revenue') {
+      revenue += reward.amount
+    } else if (reward.type === 'legacyPoints') {
+      legacyPoints += reward.amount
+    } else if (reward.type === 'scaledRevenue') {
+      // `Number.isFinite` guard, not just `Math.max` alone — an adversarial
+      // review caught that `Math.max(NaN, minAmount)` evaluates to `NaN` in
+      // JS, not `minAmount`, so `minAmount`'s own doc comment promise ("a
+      // floor beneath which this reward can never fall") would silently
+      // NOT hold against a corrupted rate (e.g. a hand-edited save with a
+      // non-finite `level` on ANY tier of either sport, even one the player
+      // never touches, poisoning `currentAggregateIncomeRatePerSecond`'s
+      // sum for every future achievement grant, not just that one tier's
+      // own future ticks). Collapsing a non-finite rate to a 0-Revenue
+      // scaled amount BEFORE the `Math.max` means the floor always applies
+      // cleanly instead — matching the same `Number.isFinite`-over-`typeof`
+      // defensive pattern `sanitizeLifetimeStats` already established for
+      // exactly this class of "never trust a persisted/computed number"
+      // case.
+      const rawRate = getIncomeRatePerSecond()
+      const scaledAmount = Number.isFinite(rawRate) ? Math.round(reward.incomeRateSeconds * rawRate) : 0
+      revenue += Math.max(scaledAmount, reward.minAmount)
+    } else {
+      assertNeverRewardType(reward)
     }
   }
   return {
@@ -496,6 +586,12 @@ export const useGameStore = create<GameState>()(
               s.achievements.earnedIds,
               s.currencies.revenue + totalEarned,
               s.legacy.legacyPoints,
+              () =>
+                currentAggregateIncomeRatePerSecond(
+                  s.tiers,
+                  s.baseballTiers,
+                  globalRevenueMultiplier(s.legacy.permanentUpgrades),
+                ),
             )
 
             return {
@@ -536,6 +632,12 @@ export const useGameStore = create<GameState>()(
               s.achievements.earnedIds,
               s.currencies.revenue + result.perTickRevenue,
               s.legacy.legacyPoints,
+              () =>
+                currentAggregateIncomeRatePerSecond(
+                  s.tiers,
+                  s.baseballTiers,
+                  globalRevenueMultiplier(s.legacy.permanentUpgrades),
+                ),
             )
 
             return {
@@ -697,6 +799,12 @@ export const useGameStore = create<GameState>()(
               s.achievements.earnedIds,
               s.currencies.revenue + totalEarned,
               s.legacy.legacyPoints,
+              () =>
+                currentAggregateIncomeRatePerSecond(
+                  s.tiers,
+                  s.baseballTiers,
+                  globalRevenueMultiplier(s.legacy.permanentUpgrades),
+                ),
             )
             return {
               baseballTiers: updatedTiers,
@@ -722,6 +830,12 @@ export const useGameStore = create<GameState>()(
               s.achievements.earnedIds,
               s.currencies.revenue + result.perTickRevenue,
               s.legacy.legacyPoints,
+              () =>
+                currentAggregateIncomeRatePerSecond(
+                  s.tiers,
+                  s.baseballTiers,
+                  globalRevenueMultiplier(s.legacy.permanentUpgrades),
+                ),
             )
             return {
               baseballTiers: updatedTiers,

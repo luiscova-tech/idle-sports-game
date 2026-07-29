@@ -5,26 +5,9 @@ import {
   estimatedTicksForBaseballTier,
   type BaseballMatchState,
 } from '../sports/baseball/baseballModule'
-import { matchOutcomeProbabilitiesWithoutDraw } from '../engine/winProbability'
+import { matchOutcomeProbabilitiesWithoutDrawTriple } from '../engine/winProbability'
 import { unlockCostMultiplier, globalRevenueMultiplier } from '../engine/prestige'
 import VentureCard from './VentureCard'
-
-/** Baseball's own outcome-probability distribution, expressed as the full
- *  generic three-outcome Record VentureCard's "Expected payout" preview
- *  expects — draw is always exactly 0, matching baseballModule.ts's real
- *  resolution (resolveMatchOutcomeWithoutDraw), which never produces one.
- *  Reuses matchOutcomeProbabilitiesWithoutDraw's win/loss RATIO directly —
- *  never a separately-maintained approximation of it. Passing this (rather
- *  than soccer's own with-draw matchOutcomeProbabilities) as VentureCard's
- *  computeOutcomeProbabilities prop is the actual fix for a real bug an
- *  adversarial review caught: the with-draw formula systematically
- *  understated baseball's true expected payout by attributing real
- *  win/loss probability mass to a draw bucket that can never actually
- *  occur. */
-function baseballOutcomeProbabilities(playerLevel: number, opponentLevel: number) {
-  const { win, loss } = matchOutcomeProbabilitiesWithoutDraw(playerLevel, opponentLevel)
-  return { win, draw: 0, loss }
-}
 
 // Safe to construct a second instance here for the same reason
 // SoccerVentureCard does — see that file's own comment.
@@ -88,7 +71,7 @@ function BaseballVentureCard({ tierId }: BaseballVentureCardProps) {
       formatMatchClock={formatBaseballClock}
       actionLabel="Step Up to Bat"
       perTickCaptionSuffix="per at-bat"
-      computeOutcomeProbabilities={baseballOutcomeProbabilities}
+      computeOutcomeProbabilities={matchOutcomeProbabilitiesWithoutDrawTriple}
       estimatedTicksPerMatch={estimatedTicksForBaseballTier(tierIndex)}
     />
   )

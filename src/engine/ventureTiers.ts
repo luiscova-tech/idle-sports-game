@@ -14,6 +14,7 @@
 
 import type { SportModule, MatchContext, MatchOutcome } from './types'
 import { advanceTick, isMatchComplete, finalizeMatch } from './tickEngine'
+import { expectedMatchRevenue } from './economy'
 
 /**
  * A venture tier's static configuration — cost/multiplier numbers only,
@@ -149,6 +150,69 @@ const AUTO_TICK_INTERVAL_GROWTH_PER_TIER = 1.4
 
 export function autoTickIntervalMsForTier(tierIndex: number): number {
   return Math.round(BASE_AUTO_TICK_INTERVAL_MS * AUTO_TICK_INTERVAL_GROWTH_PER_TIER ** tierIndex)
+}
+
+/**
+ * This ONE tier's expected Revenue-per-real-world-second, at its CURRENT
+ * level/manager status, blending both income sources every tier has (direct
+ * per-tick Revenue, and the expected match-completion bonus averaged over
+ * the tier's own real auto-tick pace) into one steady-state rate. Feeds the
+ * income-rate-scaled achievement rewards (see CLAUDE.md's income-rate-
+ * scaled-rewards amendment) — reuses `expectedMatchRevenue` (economy.ts)
+ * directly rather than a second, separately-maintained payout estimate,
+ * matching this project's own repeated "don't duplicate the payout math"
+ * lesson.
+ *
+ * Returns exactly 0 for a locked OR manager-less tier — a tier only being
+ * played via manual clicks has no PASSIVE rate to speak of (this is a
+ * "current income RATE," not "how much Revenue could this tier ever
+ * produce"), and this is deliberate: a player who has never hired any
+ * manager gets a rate of 0 from every tier, which is exactly why the
+ * income-rate-scaled reward needs its own floor (see AchievementReward's
+ * `scaledRevenue` variant) rather than assuming a nonzero rate always exists.
+ *
+ * `computeOutcomeProbabilities` is a parameter (not a hardcoded import),
+ * mirroring VentureCard.tsx's own prop of the same name — this file must
+ * stay agnostic to which sport's WITH-draw or WITHOUT-draw distribution
+ * applies, exactly like that existing prop's own doc comment explains.
+ * `estimatedTicksPerMatch` is likewise a parameter (soccer's fixed
+ * `ticksPerMatch`, or baseball's own per-tier `estimatedTicksForBaseballTier`)
+ * — this file has no way to know a variable-length sport's real average
+ * match length itself, so the caller (whoever already tracks that) supplies
+ * it, matching VentureCard.tsx's own `estimatedTicksPerMatch` prop.
+ *
+ * Uses each tier's STRUCTURAL expected opponent (the mean of
+ * opponentLevelRangeForTier's own range), not any specific match's already-
+ * drawn opponentLevel — deliberately, so this "current economy" reading
+ * doesn't fluctuate based on which random opponent an unrelated in-flight
+ * match on this tier happens to be facing at the exact instant a reward is
+ * granted elsewhere. A tier's rate is a function of (tierIndex, level)
+ * alone, not of any one match's own randomness.
+ */
+export function tierIncomeRatePerSecond(
+  tier: { unlocked: boolean; managerHired: boolean; level: number },
+  tierIndex: number,
+  config: VentureTierConfig,
+  legacyMultiplier: number,
+  computeOutcomeProbabilities: (playerLevel: number, opponentLevel: number) => Record<MatchOutcome, number>,
+  estimatedTicksPerMatch: number,
+): number {
+  if (!tier.unlocked || !tier.managerHired) return 0
+
+  const ticksPerSecond = 1000 / autoTickIntervalMsForTier(tierIndex)
+  const perTickRevenuePerSecond = tierPerTickRevenue(config, tier.level) * legacyMultiplier * ticksPerSecond
+
+  const { min, max } = opponentLevelRangeForTier(tierIndex)
+  const expectedOpponentLevel = (min + max) / 2
+  const probabilities = computeOutcomeProbabilities(tier.level, expectedOpponentLevel)
+  const expectedCompletionRevenue =
+    expectedMatchRevenue(probabilities) *
+    config.baseRevenueMultiplier *
+    trainingEffectMultiplier(tier.level) *
+    legacyMultiplier
+  const completionRevenuePerSecond = (expectedCompletionRevenue * ticksPerSecond) / estimatedTicksPerMatch
+
+  return perTickRevenuePerSecond + completionRevenuePerSecond
 }
 
 /** Result of resolving one venture-tier tick — everything a store action

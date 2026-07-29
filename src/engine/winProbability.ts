@@ -97,3 +97,23 @@ export function resolveMatchOutcomeWithoutDraw(
   const { win } = matchOutcomeProbabilitiesWithoutDraw(playerLevel, opponentLevel)
   return Math.random() < win ? 'win' : 'loss'
 }
+
+/**
+ * matchOutcomeProbabilitiesWithoutDraw expressed as the full generic
+ * three-outcome Record every consumer of a sport's `computeOutcomeProbabilities`
+ * shape expects (draw is always exactly 0, matching baseball's real
+ * resolution, which never produces one) — hoisted here (rather than left as
+ * a component-local helper) so every consumer of baseball's outcome
+ * distribution shares the exact same adapter instead of each maintaining
+ * its own copy. Originally lived only inside BaseballVentureCard.tsx; moved
+ * here when useGameStore.ts's income-rate calculation for scaled achievement
+ * rewards (see CLAUDE.md's income-rate-scaled-rewards amendment) needed the
+ * identical shape for a second consumer.
+ */
+export function matchOutcomeProbabilitiesWithoutDrawTriple(
+  playerLevel: number,
+  opponentLevel: number,
+): Record<MatchOutcome, number> {
+  const { win, loss } = matchOutcomeProbabilitiesWithoutDraw(playerLevel, opponentLevel)
+  return { win, draw: 0, loss }
+}
