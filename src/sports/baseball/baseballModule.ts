@@ -494,8 +494,14 @@ export function createBaseballModule(
  * deliberate purchase (see useGameStore.ts's createInitialBaseballTiers).
  *
  * The fictional grounded->epic->absurd arc beyond MLB (mirroring soccer's
- * own tiers 7-11) is NOT implemented here yet — it's a documented PROPOSAL
- * only (see CLAUDE.md), pending review before any tier configs are written.
+ * own tiers 7-11) — proposed for review in the "Baseball: Phase 2" amendment
+ * — is now implemented below (mudville-miracle through
+ * the-interdimensional-series), per the follow-up session that approved and
+ * calibrated it (see CLAUDE.md's "Baseball: fictional tiers" amendment).
+ * Unlike soccer's tiers 7-11, NONE of baseball's tiers — real or fictional —
+ * are prestige-gated: every one remains directly Revenue-purchasable, per
+ * this project's confirmed design decision to keep baseball fully
+ * independent of the Legacy/prestige system.
  */
 export const BASEBALL_VENTURE_TIERS: VentureTierConfig[] = [
   {
@@ -568,6 +574,75 @@ export const BASEBALL_VENTURE_TIERS: VentureTierConfig[] = [
     upgradeBaseCost: 1720000,
     upgradeCostGrowth: 1.9,
   },
+  // The five fictional tiers (grounded-legend -> sci-fi -> mythic -> eternal
+  // -> cosmic), proposed for review in the "Baseball: Phase 2" CLAUDE.md
+  // amendment and approved/implemented in this session. Numbers continue
+  // BASEBALL'S OWN established ratio bands (see the six real tiers' own
+  // ratio derivation above this array) — NOT soccer's flat/decreasing-ratio
+  // continuation — validated via simulation before finalizing (see
+  // CLAUDE.md's "Baseball: fictional tiers" amendment for the full
+  // derivation and pacing-check results):
+  //   - unlockCost/managerHireCost: continue oscillating in the exact
+  //     4.6-4.7x band the six real tiers already established (4.643, 4.615,
+  //     4.667, 4.643, 4.615 for unlockCost; 4.667, 4.571, 4.6875, 4.667,
+  //     4.571 for managerHireCost) — chosen as clean round numbers landing
+  //     in that band, not a single flat ratio.
+  //   - upgradeBaseCost: continues the ~4.0x convergence exactly (flat 4.0x
+  //     for all five, matching the last three real tiers' own 4.0/3.981/4.0).
+  //   - upgradeCostGrowth: continues the flat +0.05-per-tier pattern.
+  //   - baseRevenueMultiplier: holds at baseball's own stabilized ~3.2x
+  //     plateau (3.077x/3.25x/3.231x for the last three real tiers) rather
+  //     than still climbing or importing soccer's decreasing-ratio approach.
+  {
+    id: 'mudville-miracle',
+    name: 'The Mudville Miracle',
+    icon: '🎩',
+    baseRevenueMultiplier: 13500,
+    unlockCost: 32500000,
+    managerHireCost: 35000000,
+    upgradeBaseCost: 6880000,
+    upgradeCostGrowth: 1.95,
+  },
+  {
+    id: 'lunar-league-nights',
+    name: 'Lunar League Nights',
+    icon: '🌕',
+    baseRevenueMultiplier: 43000,
+    unlockCost: 150000000,
+    managerHireCost: 160000000,
+    upgradeBaseCost: 27520000,
+    upgradeCostGrowth: 2.0,
+  },
+  {
+    id: 'home-run-derby-of-the-gods',
+    name: 'Home Run Derby of the Gods',
+    icon: '⚡',
+    baseRevenueMultiplier: 138000,
+    unlockCost: 700000000,
+    managerHireCost: 750000000,
+    upgradeBaseCost: 110080000,
+    upgradeCostGrowth: 2.05,
+  },
+  {
+    id: 'the-eternal-inning',
+    name: 'The Eternal Inning',
+    icon: '⏳',
+    baseRevenueMultiplier: 442000,
+    unlockCost: 3250000000,
+    managerHireCost: 3500000000,
+    upgradeBaseCost: 440320000,
+    upgradeCostGrowth: 2.1,
+  },
+  {
+    id: 'the-interdimensional-series',
+    name: 'The Interdimensional Series',
+    icon: '🌀',
+    baseRevenueMultiplier: 1415000,
+    unlockCost: 15000000000,
+    managerHireCost: 16000000000,
+    upgradeBaseCost: 1761280000,
+    upgradeCostGrowth: 2.15,
+  },
 ]
 
 /** Real age-level innings counts for each tier, indexed the same way as
@@ -578,8 +653,15 @@ export const BASEBALL_VENTURE_TIERS: VentureTierConfig[] = [
  *  field on VentureTierConfig since inning count is baseball-specific
  *  vocabulary, not something the shared generic tier-config shape should
  *  know about (mirrors how soccer's opponent-level-range is ALSO computed
- *  from tierIndex externally, never stored on the tier config itself). */
-export const BASEBALL_TIER_INNINGS = [3, 6, 7, 9, 9, 9]
+ *  from tierIndex externally, never stored on the tier config itself).
+ *
+ *  The five fictional tiers (mudville-miracle through
+ *  the-interdimensional-series) all stay at the real MLB-regulation 9 —
+ *  per this session's own instruction, they escalate cost/multiplier
+ *  numbers only, introducing no new match-resolution mechanic (an actual
+ *  "infinite innings" rule for The Eternal Inning would be exactly that, so
+ *  it stays a name/theme, not a mechanic). */
+export const BASEBALL_TIER_INNINGS = [3, 6, 7, 9, 9, 9, 9, 9, 9, 9, 9]
 
 export function inningsForBaseballTier(tierIndex: number): number {
   return BASEBALL_TIER_INNINGS[tierIndex] ?? BASEBALL_TIER_INNINGS[BASEBALL_TIER_INNINGS.length - 1]

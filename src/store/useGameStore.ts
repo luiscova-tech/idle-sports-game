@@ -394,7 +394,7 @@ interface GameState {
  * resolved outcome, so tolerant reads are the right fix there, not a
  * migration step here.
  */
-const CURRENT_SCHEMA_VERSION = 4
+const CURRENT_SCHEMA_VERSION = 5
 
 /**
  * SCHEMA_MIGRATIONS[v] transforms a persisted state KNOWN to be shaped like
@@ -472,6 +472,25 @@ const SCHEMA_MIGRATIONS: Record<number, (state: any) => any> = {
   // to preserve there); this step runs against a version-3 save, which DOES
   // have real progress to preserve.
   3: (state: any) => {
+    if (Array.isArray(state?.baseballTiers) && state.baseballTiers.length < BASEBALL_VENTURE_TIERS.length) {
+      const freshBaseballTiers = createInitialBaseballTiers()
+      state = {
+        ...state,
+        baseballTiers: [...state.baseballTiers, ...freshBaseballTiers.slice(state.baseballTiers.length)],
+      }
+    }
+    return state
+  },
+  // Version 4 -> 5: baseball's own tier list grew again, from 6 tiers
+  // (Phase 2's completed real arc) to 11 (this session's 5 fictional tiers
+  // — mudville-miracle through the-interdimensional-series; see CLAUDE.md's
+  // "Baseball: fictional tiers" amendment). A version-4 save's
+  // `baseballTiers` has REAL progress on its existing 6 entries — same
+  // "pad, don't replace" pattern as SCHEMA_MIGRATIONS[3] (which did the
+  // exact same thing for the 3->6 growth), not SCHEMA_MIGRATIONS[1]'s full
+  // replacement (which only ever runs against a save that predates
+  // baseballTiers existing as a feature at all).
+  4: (state: any) => {
     if (Array.isArray(state?.baseballTiers) && state.baseballTiers.length < BASEBALL_VENTURE_TIERS.length) {
       const freshBaseballTiers = createInitialBaseballTiers()
       state = {
