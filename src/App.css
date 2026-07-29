@@ -17,24 +17,6 @@
   margin-bottom: var(--space-6);
 }
 
-.app-header__settings-link {
-  position: absolute;
-  top: 0;
-  right: 0;
-  font-size: 1.25rem;
-  line-height: 1;
-  text-decoration: none;
-  color: var(--color-text-muted);
-  padding: var(--space-2);
-  border-radius: var(--radius-sm);
-  transition: color 0.15s ease, background-color 0.15s ease;
-}
-
-.app-header__settings-link:hover {
-  color: var(--color-text);
-  background: var(--color-muted-surface);
-}
-
 .app-header__title {
   font-size: 1.75rem;
   font-weight: 700;
@@ -104,19 +86,48 @@
   gap: var(--space-4);
 }
 
-/* ---------- Settings page ---------- */
+/* ---------- Tab navigation ---------- */
+/* See CLAUDE.md's tabbed-navigation amendment: replaces the old single
+   combined-list screen. Plain component-local state in Home.tsx, not
+   react-router — these are visual sections, not distinct pages. */
 
-.settings-page__back-link {
-  display: inline-block;
-  margin-top: var(--space-2);
-  font-size: 0.85rem;
+.tab-nav {
+  display: flex;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.tab-nav__button {
+  flex: 1;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.tab-nav__button:hover {
+  color: var(--color-text);
+  background: var(--color-muted-surface);
+}
+
+.tab-nav__button--active {
   color: var(--color-primary);
-  text-decoration: none;
+  background: var(--color-surface);
+  border-color: var(--color-primary);
+  box-shadow: var(--shadow-card);
 }
 
-.settings-page__back-link:hover {
-  text-decoration: underline;
-}
+/* ---------- Franchise tab: Developer Tools section ---------- */
+/* Formerly a standalone /settings route's styles — folded into the
+   Franchise tab (see FranchiseTab.tsx), classes kept as-is since they're
+   still exactly as applicable to a section within a tab as they were to a
+   whole page. */
 
 .settings-section {
   background: var(--color-surface);

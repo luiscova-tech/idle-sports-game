@@ -26,34 +26,65 @@ export function assertNeverRewardType(type: never): never {
   throw new Error(`Unhandled achievement reward type: ${JSON.stringify(type)}`)
 }
 
+/** Display label per `statTracked` key, for grouping badges in the UI. A
+ *  new achievement line adds one entry here alongside its ACHIEVEMENTS
+ *  entries — `as const` makes this object the single source of truth for
+ *  every known stat key (see StatKey below), rather than a plain
+ *  `Record<string, string>` that couldn't catch a typo anywhere else. */
+export const STAT_LABELS = {
+  totalWins: 'Total Wins',
+  soccerWins: 'Soccer Wins',
+  baseballWins: 'Baseball Wins',
+} as const
+
+/** Every known stat key an achievement line can track, derived from
+ *  STAT_LABELS' own keys rather than hand-maintained separately — adding a
+ *  new achievement line's one required STAT_LABELS entry (per that
+ *  object's own doc comment) automatically widens this type too, so
+ *  AchievementConfig.statTracked and AchievementsPanel's statKeys prop
+ *  (src/components/AchievementsPanel.tsx) can both be typed against it.
+ *  This is NOT the "widen a union type by hand" cost the old `statTracked:
+ *  string` doc comment was written to avoid — an adversarial review caught
+ *  that being fully untyped let a typo (in either a new ACHIEVEMENTS entry
+ *  or a tab's statKeys array) silently render an empty Achievements panel
+ *  with no error, since a stringly-typed mismatch just filters every
+ *  achievement out. Deriving StatKey from STAT_LABELS costs nothing beyond
+ *  the entry every new line already has to add there. */
+export type StatKey = keyof typeof STAT_LABELS
+
 /** 'Bronze' | 'Silver' | 'Gold' are this session's only tiers, but `tier`
  *  is a plain string on purpose — a future line can introduce its own
- *  (e.g. 'Platinum') without widening a union type here. */
+ *  (e.g. 'Platinum') without widening a union type here. `statTracked`
+ *  is NOT similarly open-ended (see StatKey above) — the two fields are
+ *  deliberately treated differently: a new TIER name is purely cosmetic
+ *  (nothing else needs to agree with it), while a new STAT key has to
+ *  agree with whatever the store tracks and whatever a tab's statKeys
+ *  filters on, which is exactly the kind of cross-file agreement a shared
+ *  type is for. */
 export interface AchievementConfig {
   id: string
   name: string
   /** Key into the stats record passed to checkNewlyEarnedAchievements() —
-   *  e.g. 'totalWins'. A plain string, not an enum, so a new stat is just
-   *  a new key the store starts tracking and reporting. */
-  statTracked: string
+   *  e.g. 'totalWins'. */
+  statTracked: StatKey
   threshold: number
   tier: string
   reward: AchievementReward
 }
 
-/** Display label per `statTracked` key, for grouping badges in the UI.
- *  A new achievement line adds one entry here alongside its ACHIEVEMENTS
- *  entries. */
-export const STAT_LABELS: Record<string, string> = {
-  totalWins: 'Total Wins',
-}
-
 /**
- * First achievement line: total wins across every venture tier combined
- * (not per-tier) — see CLAUDE.md "Achievements" for the threshold/reward
- * derivation (grounded in a simulation of realistic play speed). Bronze
- * and Silver reward Revenue; Gold rewards Legacy Points, deliberately
- * bridging the run currency into the permanent one.
+ * First achievement line: total wins across every venture tier of EVERY
+ * sport combined (not per-tier, not per-sport) — see CLAUDE.md "Achievements"
+ * for the threshold/reward derivation (grounded in a simulation of realistic
+ * play speed). Bronze and Silver reward Revenue; Gold rewards Legacy Points,
+ * deliberately bridging the run currency into the permanent one.
+ *
+ * Audited when baseball was added as a second sport, and again when the
+ * two per-sport lines below were added: `totalWins` already correctly
+ * counts baseball wins alongside soccer wins (see useGameStore.ts's
+ * tickTier/tickBaseballTier — both increment the exact same
+ * `lifetimeStats.totalWins` field from their own completed-match branch),
+ * so no fix was ever needed here for that.
  */
 export const ACHIEVEMENTS: AchievementConfig[] = [
   // A very-low-threshold onboarding nudge, deliberately NOT tiered as
@@ -95,6 +126,92 @@ export const ACHIEVEMENTS: AchievementConfig[] = [
     threshold: 1000,
     tier: 'Gold',
     reward: { type: 'legacyPoints', amount: 10 },
+  },
+
+  // Second and third achievement lines: per-sport win counts, added
+  // alongside the tabbed-navigation restructuring so each sport's tab can
+  // show its own badge progress (see CLAUDE.md's tabbed-navigation
+  // amendment). Deliberately smaller rewards than the combined `totalWins`
+  // line above (roughly half, at each matching tier) — these are a fun
+  // sport-specific complement to the "biggest" combined milestone, not a
+  // second copy of the same reward.
+  //
+  // THRESHOLD DERIVATION — calibrated independently per sport via a direct-
+  // import Node harness driving the real soccerModule/baseballModule/
+  // ventureTiers code (not a reimplementation), simulating the same greedy
+  // "unlock next tier > hire manager > train" policy at 1 manual click/sec
+  // plus each tier's own real auto-tick interval once a manager is hired —
+  // the same methodology this project's original totalWins thresholds used
+  // (see this file's own history in CLAUDE.md). Soccer's own pace (over its
+  // 6 starting tiers) reached 50/250/1000 wins at ~19.2/78.8/302.8 simulated
+  // minutes under the CURRENT economy — close enough to the original
+  // 15.6/67/260-minute derivation (from years of intervening balance
+  // changes: milestone multipliers, the margin-bonus formula, etc.) that the
+  // existing 50/250/1000 numbers were kept for "Soccer Wins" rather than
+  // changed, now re-validated against the current codebase rather than
+  // merely inherited.
+  //
+  // Baseball's own simulation (over its 3 tiers, isolated from however long
+  // it took to first afford unlocking Tee Time) reaches equivalent WIN
+  // COUNTS meaningfully faster in real time than soccer does — baseball has
+  // no draw state (a strictly higher effective win rate than soccer's
+  // win/draw/loss split) and its early tiers' shorter, variable-inning
+  // matches complete in fewer ticks than soccer's fixed 90. Copying
+  // soccer's 50/250/1000 onto baseball would have made baseball's badges
+  // trivially fast to earn relative to soccer's — instead, baseball's
+  // thresholds (75/300/1200) were chosen as the win counts that land at
+  // roughly the SAME simulated time targets soccer's own 50/250/1000 hit
+  // (~19/79/303 min): the simulation's own data points and interpolation
+  // put 75 wins at ~17.7 min, 300 at ~71.9 min, and 1200 at ~272.4 min —
+  // meaningfully different numbers than soccer's, by design, because
+  // baseball genuinely produces wins faster per unit of real time.
+  {
+    id: 'soccer-wins-bronze',
+    name: 'Pitch Perfect Fifty',
+    statTracked: 'soccerWins',
+    threshold: 50,
+    tier: 'Bronze',
+    reward: { type: 'revenue', amount: 100 },
+  },
+  {
+    id: 'soccer-wins-silver',
+    name: 'Quarter-Thousand Kicks',
+    statTracked: 'soccerWins',
+    threshold: 250,
+    tier: 'Silver',
+    reward: { type: 'revenue', amount: 1000 },
+  },
+  {
+    id: 'soccer-wins-gold',
+    name: 'Thousand-Win Gaffer',
+    statTracked: 'soccerWins',
+    threshold: 1000,
+    tier: 'Gold',
+    reward: { type: 'legacyPoints', amount: 5 },
+  },
+  {
+    id: 'baseball-wins-bronze',
+    name: 'Diamond Debut',
+    statTracked: 'baseballWins',
+    threshold: 75,
+    tier: 'Bronze',
+    reward: { type: 'revenue', amount: 100 },
+  },
+  {
+    id: 'baseball-wins-silver',
+    name: 'Three Hundred Club',
+    statTracked: 'baseballWins',
+    threshold: 300,
+    tier: 'Silver',
+    reward: { type: 'revenue', amount: 1000 },
+  },
+  {
+    id: 'baseball-wins-gold',
+    name: 'Hall of Fame Bound',
+    statTracked: 'baseballWins',
+    threshold: 1200,
+    tier: 'Gold',
+    reward: { type: 'legacyPoints', amount: 5 },
   },
 ]
 

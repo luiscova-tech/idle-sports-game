@@ -1,30 +1,45 @@
-import { Link } from 'react-router-dom'
+import { useState } from 'react'
 import { useGameStore } from '../store/useGameStore'
-import { SOCCER_VENTURE_TIERS, revealedTierCount } from '../sports/soccer/soccerModule'
-import { BASEBALL_VENTURE_TIERS } from '../sports/baseball/baseballModule'
-import SoccerVentureCard from '../components/SoccerVentureCard'
-import BaseballVentureCard from '../components/BaseballVentureCard'
-import LegacyPanel from '../components/LegacyPanel'
-import AchievementsPanel from '../components/AchievementsPanel'
+import SoccerTab from '../components/SoccerTab'
+import BaseballTab from '../components/BaseballTab'
+import FranchiseTab from '../components/FranchiseTab'
 
+type TabId = 'soccer' | 'baseball' | 'franchise'
+
+const TABS: { id: TabId; label: string; icon: string }[] = [
+  { id: 'soccer', label: 'Soccer', icon: '⚽' },
+  { id: 'baseball', label: 'Baseball', icon: '⚾' },
+  { id: 'franchise', label: 'Franchise', icon: '🏆' },
+]
+
+/**
+ * Three-tab main screen (see CLAUDE.md's tabbed-navigation amendment,
+ * superseding the earlier single combined-list screen described in the
+ * "Venture tiers" amendment). Tabs are plain component-local state, not
+ * routes — switching tabs never touches react-router, so there is no
+ * navigation event of any kind for useMatchTicker (mounted once in App.tsx,
+ * unconditionally, above this component) to be affected by. That's a
+ * stronger structural guarantee than the old /settings route ever had: it's
+ * not just "the hook happens to live above the route," there is no route
+ * transition here at all — every tab's tiers keep ticking in the store
+ * regardless of which tab is currently rendered, since the auto-tick
+ * intervals only ever call store actions directly and were never coupled to
+ * what's mounted below. Verified directly in the browser regardless (see
+ * CLAUDE.md) rather than assumed from this reasoning alone.
+ *
+ * Total Revenue stays in this persistent header, visible across all three
+ * tabs — it's one shared currency (see useGameStore.ts's own currency-
+ * separation-by-type-not-by-tab principle), not something scoped to any one
+ * tab the way each tab's own achievement line or tier list is.
+ */
 function Home() {
+  const [activeTab, setActiveTab] = useState<TabId>('soccer')
   const isInitialized = useGameStore((state) => state.isInitialized)
   const revenue = useGameStore((state) => state.currencies.revenue)
-  const prestigeCount = useGameStore((state) => state.legacy.prestigeCount)
-
-  // Tiers 7-11 (legends-circuit onward) don't exist in the UI at all until
-  // revealed — one at a time, per completed prestige (see revealedTierCount)
-  // — and stay revealed permanently for that save once shown (prestigeCount
-  // never decreases on a normal prestige reset, only on the full dev wipe on
-  // the Settings page).
-  const visibleSoccerTiers = SOCCER_VENTURE_TIERS.slice(0, revealedTierCount(prestigeCount))
 
   return (
     <div className="app-shell">
       <header className="app-header">
-        <Link to="/settings" className="app-header__settings-link" aria-label="Settings">
-          ⚙
-        </Link>
         <h1 className="app-header__title">Idle Sports Franchise Builder</h1>
         <p className="app-header__status">
           Engine Online · Game store initialized: {String(isInitialized)}
@@ -35,25 +50,23 @@ function Home() {
         </div>
       </header>
 
-      <LegacyPanel />
-      <AchievementsPanel />
+      <nav className="tab-nav" aria-label="Main sections">
+        {TABS.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            className={`tab-nav__button ${activeTab === tab.id ? 'tab-nav__button--active' : ''}`}
+            aria-current={activeTab === tab.id ? 'page' : undefined}
+            onClick={() => setActiveTab(tab.id)}
+          >
+            <span aria-hidden="true">{tab.icon}</span> {tab.label}
+          </button>
+        ))}
+      </nav>
 
-      {/* Soccer and baseball tiers share ONE combined list — they share the
-          same Revenue currency and the same visual card language, so they
-          read as one coherent venture portfolio rather than two separate
-          games bolted together (see CLAUDE.md's "Baseball" amendment).
-          Baseball tiers render after soccer's — unlike soccer's reveal
-          mechanic, baseball has no hidden-until-prestige tiers to slice
-          out; entering the sport at all is gated by Tee Time's own locked-
-          card unlock purchase instead. */}
-      <div className="venture-list">
-        {visibleSoccerTiers.map((config) => (
-          <SoccerVentureCard key={config.id} tierId={config.id} />
-        ))}
-        {BASEBALL_VENTURE_TIERS.map((config) => (
-          <BaseballVentureCard key={config.id} tierId={config.id} />
-        ))}
-      </div>
+      {activeTab === 'soccer' && <SoccerTab />}
+      {activeTab === 'baseball' && <BaseballTab />}
+      {activeTab === 'franchise' && <FranchiseTab />}
     </div>
   )
 }

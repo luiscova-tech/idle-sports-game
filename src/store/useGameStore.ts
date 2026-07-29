@@ -122,13 +122,55 @@ function createInitialLegacy(): LegacyState {
  *  `legacy` above), only by the full resetProgress() wipe. A future
  *  achievement line (total Revenue earned, matches played, ...) adds a
  *  sibling field here plus its own increment site, alongside its config
- *  entries in `src/engine/achievements.ts`. */
+ *  entries in `src/engine/achievements.ts`.
+ *
+ *  `soccerWins`/`baseballWins` (added alongside the "Soccer Wins"/"Baseball
+ *  Wins" achievement lines) are per-sport breakdowns of the exact same wins
+ *  `totalWins` already counts — `totalWins` itself is untouched by their
+ *  addition, still incremented on every winning tick of either sport,
+ *  exactly as it always has been (see tickTier/tickBaseballTier below: both
+ *  branches now increment ALL THREE counters from the same single win
+ *  event, never two separate increments that could drift apart). */
 export interface LifetimeStats {
   totalWins: number
+  soccerWins: number
+  baseballWins: number
 }
 
 function createInitialLifetimeStats(): LifetimeStats {
-  return { totalWins: 0 }
+  return { totalWins: 0, soccerWins: 0, baseballWins: 0 }
+}
+
+/**
+ * Sanitizes a `lifetimeStats` value of UNKNOWN shape (persisted JSON,
+ * possibly hand-edited or corrupted) into a valid LifetimeStats, backfilling
+ * any missing/non-finite numeric field to 0. Shared by SCHEMA_MIGRATIONS[2]
+ * (the version-gated migration path, run only when a save's persisted
+ * version differs from CURRENT_SCHEMA_VERSION) AND merge()'s own guard
+ * below (which runs on EVERY load, version match or not) — an adversarial
+ * review caught that these needed to be the same function, not two
+ * independently-written ones: a save already reporting the CURRENT schema
+ * version skips migrate() entirely (zustand only invokes it on a version
+ * mismatch), so a corrupted-but-current-version `lifetimeStats` — e.g. a
+ * hand-edited `null`, or an object missing `soccerWins`/`baseballWins` —
+ * would sail straight through the old unguarded `merge()` and either crash
+ * AchievementsPanel.tsx's unconditional `s.lifetimeStats.totalWins` read on
+ * the very next render (a `null` case), or silently poison
+ * `soccerWins`/`baseballWins` to `NaN` forever the next time `tickTier`/
+ * `tickBaseballTier` computed `s.lifetimeStats.soccerWins + 1` against an
+ * `undefined` field (a missing-subfield case) — permanently blocking that
+ * save's soccer-wins/baseball-wins achievement tiers with no visible error.
+ * Uses `Number.isFinite`, not `typeof x === 'number'`, specifically because
+ * `typeof NaN === 'number'` is true — a check that only looked at `typeof`
+ * would accept an already-poisoned NaN as "valid" instead of repairing it.
+ */
+function sanitizeLifetimeStats(value: unknown): LifetimeStats {
+  const candidate = value && typeof value === 'object' ? (value as Partial<LifetimeStats>) : {}
+  return {
+    totalWins: Number.isFinite(candidate.totalWins) ? (candidate.totalWins as number) : 0,
+    soccerWins: Number.isFinite(candidate.soccerWins) ? (candidate.soccerWins as number) : 0,
+    baseballWins: Number.isFinite(candidate.baseballWins) ? (candidate.baseballWins as number) : 0,
+  }
 }
 
 /** Which achievement ids (from `src/engine/achievements.ts`'s ACHIEVEMENTS)
@@ -262,7 +304,7 @@ interface GameState {
  * resolved outcome, so tolerant reads are the right fix there, not a
  * migration step here.
  */
-const CURRENT_SCHEMA_VERSION = 2
+const CURRENT_SCHEMA_VERSION = 3
 
 /**
  * SCHEMA_MIGRATIONS[v] transforms a persisted state KNOWN to be shaped like
@@ -304,6 +346,27 @@ const SCHEMA_MIGRATIONS: Record<number, (state: any) => any> = {
     }
     return state
   },
+  // Version 2 -> 3: LifetimeStats gained soccerWins/baseballWins (per-sport
+  // breakdowns feeding the new "Soccer Wins"/"Baseball Wins" achievement
+  // lines) alongside the pre-existing totalWins. A version-2 save's
+  // lifetimeStats has no such fields at all. There is no sensible backfill
+  // OTHER than 0 for either — unlike the tiers-padding/baseballTiers-backfill
+  // migrations above, there's no historical per-sport breakdown of past wins
+  // to recover (this project never tracked which sport a win came from until
+  // now), so retroactively crediting existing totalWins to either counter
+  // would be fabricating data, not recovering it. totalWins itself is left
+  // completely untouched — only the two new counters are backfilled, both to
+  // 0, meaning an existing player's "Soccer Wins"/"Baseball Wins" progress
+  // starts fresh from their very next win in each sport, same as any
+  // brand-new achievement line always has to for players who already had
+  // relevant history before it existed (see the "First Win" line's own
+  // twelfth-amendment addition for the same shape of gap). Defensively
+  // rebuilds the whole lifetimeStats object (not just the two new fields)
+  // in case a corrupted/hand-edited save has a non-object or partially
+  // shaped `lifetimeStats` at all — matching this file's existing
+  // never-trust-persisted-shape posture for tiers/baseballTiers/notifications
+  // above, just for a plain-object field instead of an array one.
+  2: (state: any) => ({ ...state, lifetimeStats: sanitizeLifetimeStats(state?.lifetimeStats) }),
 }
 
 function migrateGameState(persistedState: unknown, version: number): unknown {
@@ -412,14 +475,24 @@ export const useGameStore = create<GameState>()(
 
             // Lifetime win count (across every venture tier of every sport
             // combined) feeds the achievement framework — see LifetimeStats
-            // above. Checked and granted atomically in this same set() (via
-            // the shared applyEarnedAchievements() helper, also called from
-            // the non-completion branch below AND from baseball's own tick
+            // above. `soccerWins` is the same win event's per-sport
+            // breakdown, incremented alongside `totalWins` from the exact
+            // same `result.outcome === 'win'` check — never a second,
+            // separately-derived increment that could drift out of sync
+            // with the combined counter. `baseballWins` is passed through
+            // UNCHANGED (this is soccer's own tick action; baseball's own
+            // wins are never touched here), matching the symmetric-stats-
+            // record pattern applyEarnedAchievements expects. Checked and
+            // granted atomically in this same set() (via the shared
+            // applyEarnedAchievements() helper, also called from the
+            // non-completion branch below AND from baseball's own tick
             // action) so the UI never renders a frame where the reward
             // landed but the badge hasn't, or vice versa.
-            const totalWins = s.lifetimeStats.totalWins + (result.outcome === 'win' ? 1 : 0)
+            const isWin = result.outcome === 'win'
+            const totalWins = s.lifetimeStats.totalWins + (isWin ? 1 : 0)
+            const soccerWins = s.lifetimeStats.soccerWins + (isWin ? 1 : 0)
             const granted = applyEarnedAchievements(
-              { totalWins },
+              { totalWins, soccerWins, baseballWins: s.lifetimeStats.baseballWins },
               s.achievements.earnedIds,
               s.currencies.revenue + totalEarned,
               s.legacy.legacyPoints,
@@ -428,7 +501,7 @@ export const useGameStore = create<GameState>()(
             return {
               tiers: updatedTiers,
               currencies: { revenue: granted.revenue },
-              lifetimeStats: { ...s.lifetimeStats, totalWins },
+              lifetimeStats: { ...s.lifetimeStats, totalWins, soccerWins },
               achievements: granted.grantedCount ? { earnedIds: granted.earnedIds } : s.achievements,
               legacy: granted.grantedCount ? { ...s.legacy, legacyPoints: granted.legacyPoints } : s.legacy,
             }
@@ -447,14 +520,19 @@ export const useGameStore = create<GameState>()(
             )
 
             // No tracked stat currently changes on a non-completion tick
-            // (totalWins only changes at match completion, above), so this
-            // check is a no-op today — but it runs symmetrically with the
-            // completion branch on purpose, so a FUTURE achievement line
-            // tracking a stat that changes every tick (e.g. total Revenue
-            // earned) gets caught the moment it crosses a threshold, not
-            // just whenever a match next happens to complete.
+            // (totalWins/soccerWins/baseballWins only change at match
+            // completion, above), so this check is a no-op today — but it
+            // runs symmetrically with the completion branch on purpose, so
+            // a FUTURE achievement line tracking a stat that changes every
+            // tick (e.g. total Revenue earned) gets caught the moment it
+            // crosses a threshold, not just whenever a match next happens
+            // to complete.
             const granted = applyEarnedAchievements(
-              { totalWins: s.lifetimeStats.totalWins },
+              {
+                totalWins: s.lifetimeStats.totalWins,
+                soccerWins: s.lifetimeStats.soccerWins,
+                baseballWins: s.lifetimeStats.baseballWins,
+              },
               s.achievements.earnedIds,
               s.currencies.revenue + result.perTickRevenue,
               s.legacy.legacyPoints,
@@ -606,9 +684,16 @@ export const useGameStore = create<GameState>()(
                   }
                 : t,
             )
-            const totalWins = s.lifetimeStats.totalWins + (result.outcome === 'win' ? 1 : 0)
+            // Structurally the same increment shape as soccer's tickTier
+            // above, just baseballWins instead of soccerWins — see that
+            // action's own comment for why both counters are always derived
+            // from the same single `result.outcome === 'win'` check rather
+            // than two independent increments.
+            const isWin = result.outcome === 'win'
+            const totalWins = s.lifetimeStats.totalWins + (isWin ? 1 : 0)
+            const baseballWins = s.lifetimeStats.baseballWins + (isWin ? 1 : 0)
             const granted = applyEarnedAchievements(
-              { totalWins },
+              { totalWins, soccerWins: s.lifetimeStats.soccerWins, baseballWins },
               s.achievements.earnedIds,
               s.currencies.revenue + totalEarned,
               s.legacy.legacyPoints,
@@ -616,7 +701,7 @@ export const useGameStore = create<GameState>()(
             return {
               baseballTiers: updatedTiers,
               currencies: { revenue: granted.revenue },
-              lifetimeStats: { ...s.lifetimeStats, totalWins },
+              lifetimeStats: { ...s.lifetimeStats, totalWins, baseballWins },
               achievements: granted.grantedCount ? { earnedIds: granted.earnedIds } : s.achievements,
               legacy: granted.grantedCount ? { ...s.legacy, legacyPoints: granted.legacyPoints } : s.legacy,
             }
@@ -629,7 +714,11 @@ export const useGameStore = create<GameState>()(
                 : t,
             )
             const granted = applyEarnedAchievements(
-              { totalWins: s.lifetimeStats.totalWins },
+              {
+                totalWins: s.lifetimeStats.totalWins,
+                soccerWins: s.lifetimeStats.soccerWins,
+                baseballWins: s.lifetimeStats.baseballWins,
+              },
               s.achievements.earnedIds,
               s.currencies.revenue + result.perTickRevenue,
               s.legacy.legacyPoints,
@@ -924,7 +1013,8 @@ export const useGameStore = create<GameState>()(
       // `s.tiers.filter(...)`, called unconditionally before any route) hard
       // -crashes the whole app with no error boundary — worse than before,
       // since it also blocks the only no-devtools recovery path (the
-      // Settings page's DEV wipe button). Restoring the original
+      // Franchise tab's DEV wipe button, formerly a separate /settings
+      // route — see CLAUDE.md's tabbed-navigation amendment). Restoring the original
       // silently-keep-defaults behavior explicitly here, rather than
       // depending on an accidental throw deep in a promise chain to keep
       // providing it.
@@ -941,6 +1031,22 @@ export const useGameStore = create<GameState>()(
         if (!Array.isArray(merged.baseballTiers) || merged.baseballTiers.length !== BASEBALL_VENTURE_TIERS.length) {
           merged.baseballTiers = currentState.baseballTiers
         }
+        // lifetimeStats gets the same never-trust-the-shape treatment as
+        // tiers/baseballTiers above, via the SAME sanitizeLifetimeStats()
+        // SCHEMA_MIGRATIONS[2] uses — not a second, independently-written
+        // guard. This matters even for a save already AT the current
+        // schema version: migrate() only runs on a version MISMATCH, so a
+        // corrupted-but-current-version lifetimeStats (a hand-edited
+        // `null`, or one missing soccerWins/baseballWins) would otherwise
+        // never pass through SCHEMA_MIGRATIONS[2] at all and would sail
+        // through this blind spread unrepaired — an adversarial review
+        // caught this crashing AchievementsPanel.tsx on the very next
+        // render (a null case) or silently poisoning soccerWins/
+        // baseballWins to NaN forever on the next win in that sport (a
+        // missing-subfield case). Runs unconditionally, whether or not
+        // migrate() already sanitized it, since re-validating an
+        // already-valid object is a harmless no-op.
+        merged.lifetimeStats = sanitizeLifetimeStats(merged.lifetimeStats)
         return merged
       },
     },

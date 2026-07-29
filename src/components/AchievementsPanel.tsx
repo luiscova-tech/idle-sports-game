@@ -4,6 +4,7 @@ import {
   STAT_LABELS,
   assertNeverRewardType,
   type AchievementReward,
+  type StatKey,
 } from '../engine/achievements'
 import './AchievementsPanel.css'
 
@@ -27,24 +28,43 @@ function rewardLabel(reward: AchievementReward): string {
   }
 }
 
+interface AchievementsPanelProps {
+  /** Which achievement lines (by `statTracked` key) to render — e.g. the
+   *  Soccer tab passes `['soccerWins']` to show only its own line, while the
+   *  Franchise tab passes `['totalWins']` for the combined one (see
+   *  CLAUDE.md's tabbed-navigation amendment). Omit to render every line —
+   *  the original, pre-tabs behavior — so this stays a filter, not a
+   *  required prop. Typed as `StatKey[]`, not `string[]` — an adversarial
+   *  review caught that a plain `string[]` here couldn't catch a typo'd
+   *  key at a call site (the achievement panel would just silently render
+   *  its header with zero lines beneath it, indistinguishable from "nothing
+   *  earned yet"); StatKey ties this to the same source of truth
+   *  AchievementConfig.statTracked uses. */
+  statKeys?: StatKey[]
+}
+
 // Groups ACHIEVEMENTS by statTracked so this stays correct with zero
 // changes here when a new achievement line is added to the engine config
 // — one more group just appears. Distinct visual system on purpose (see
 // index.css's --color-achievement*/--color-badge-* tokens) — its own
 // currency-agnostic system, separate from both the tier cards and Legacy.
-function AchievementsPanel() {
+function AchievementsPanel({ statKeys }: AchievementsPanelProps) {
   // The one explicit adapter step a new achievement line needs outside of
   // engine/achievements.ts's config: map whatever lifetime stat it tracks
   // into this generic stats record, keyed the same as that line's
-  // `statTracked`. Only one entry exists today (totalWins).
+  // `statTracked`. Three entries exist today (totalWins, plus soccerWins/
+  // baseballWins added alongside the tabbed-navigation restructuring).
   const totalWins = useGameStore((s) => s.lifetimeStats.totalWins)
-  const stats: Record<string, number> = { totalWins }
+  const soccerWins = useGameStore((s) => s.lifetimeStats.soccerWins)
+  const baseballWins = useGameStore((s) => s.lifetimeStats.baseballWins)
+  const stats: Record<string, number> = { totalWins, soccerWins, baseballWins }
 
   const earnedIds = useGameStore((s) => s.achievements.earnedIds)
   const earnedSet = new Set(earnedIds)
 
-  const groups = new Map<string, typeof ACHIEVEMENTS>()
+  const groups = new Map<StatKey, typeof ACHIEVEMENTS>()
   for (const achievement of ACHIEVEMENTS) {
+    if (statKeys && !statKeys.includes(achievement.statTracked)) continue
     const line = groups.get(achievement.statTracked) ?? []
     line.push(achievement)
     groups.set(achievement.statTracked, line)
