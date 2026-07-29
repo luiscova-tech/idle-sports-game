@@ -70,6 +70,80 @@ export function tierUpgradeCost(config: VentureTierConfig, currentLevel: number)
 }
 
 /**
+ * Rescales a WHOLE reference tier ladder by a single multiplicative factor —
+ * the sport-agnostic mechanism behind this project's "income-rate-anchored
+ * entry costs" standing convention (see CLAUDE.md). Multiplies every one of
+ * the four CURRENCY-scale fields (`unlockCost`, `managerHireCost`,
+ * `upgradeBaseCost`, `baseRevenueMultiplier`) by `anchorMultiplier`, rounded;
+ * `id`/`name`/`icon`/`upgradeCostGrowth` pass through unchanged.
+ * `upgradeCostGrowth` deliberately does NOT get rescaled — it's a
+ * dimensionless per-level growth RATE, not an absolute currency amount, so
+ * leaving it alone is what makes the ladder's SHAPE (both its tier-to-tier
+ * cost ratios and each tier's own internal revenue-to-cost pacing) come out
+ * byte-for-byte identical to the reference curve, just relocated to a new
+ * absolute starting point. This is why a single scalar is sufficient to
+ * "re-anchor" an entire ladder at once, rather than needing to separately
+ * re-derive each tier's own ratio.
+ */
+export function scaledTierConfigs(
+  referenceTiers: VentureTierConfig[],
+  anchorMultiplier: number,
+): VentureTierConfig[] {
+  return referenceTiers.map((config) => ({
+    ...config,
+    unlockCost: Math.round(config.unlockCost * anchorMultiplier),
+    managerHireCost: Math.round(config.managerHireCost * anchorMultiplier),
+    upgradeBaseCost: Math.round(config.upgradeBaseCost * anchorMultiplier),
+    baseRevenueMultiplier: Math.round(config.baseRevenueMultiplier * anchorMultiplier),
+  }))
+}
+
+/**
+ * Derives the multiplier `scaledTierConfigs` above should apply, from a
+ * snapshot of the player's current aggregate income rate (Revenue/second,
+ * summed across every unlocked+managed tier of every sport — see
+ * useGameStore.ts's `currentAggregateIncomeRatePerSecond`) — see CLAUDE.md's
+ * "income-rate-anchored entry costs" convention for the full reasoning.
+ *
+ * `anchorSeconds` is how many seconds of that income rate the REFERENCE
+ * ladder's OWN first tier's `unlockCost` should represent once rescaled —
+ * e.g. at `anchorSeconds=60`, a player earning 10,000 Revenue/second sees
+ * that first tier cost roughly 600,000 (60 seconds of their OWN current
+ * earning power), regardless of how large or small the reference curve's
+ * own hardcoded number originally was.
+ *
+ * The result never drops below `1` — the reference curve's OWN numbers,
+ * completely unscaled — which is what protects a near-zero-income player (a
+ * genuinely fresh save, or one that simply hasn't invested in anything yet)
+ * from the opposite failure mode this convention exists to avoid: a sport
+ * becoming suspiciously CHEAPER than its own original, carefully-simulated
+ * baseline just because "current income" briefly reads as near-zero.
+ * Defensively collapses any non-finite or non-positive income rate (a
+ * corrupted save, a divide-by-zero-shaped edge case) to that same floor,
+ * rather than ever propagating a NaN/Infinity into a persisted cost ladder —
+ * once a migration BAKES this multiplier into a save, there is no periodic
+ * recomputation to later self-correct a poisoned value.
+ */
+export function incomeRateAnchorMultiplier(
+  incomeRatePerSecond: number,
+  anchorSeconds: number,
+  referenceFirstTierUnlockCost: number,
+): number {
+  if (!Number.isFinite(incomeRatePerSecond) || incomeRatePerSecond <= 0) return 1
+  // Re-check the RESULT for finiteness, not just the input — a finite but
+  // astronomically large income (a corrupted/hand-edited save) times
+  // anchorSeconds can overflow to Infinity, and `Math.max(1, Infinity)` is
+  // Infinity, which would then bake a non-finite multiplier into the save
+  // (poisoning scaledTierConfigs into Infinity/NaN costs). This function's
+  // own doc promises to never propagate a non-finite value, so it must guard
+  // its output, not merely its input — not reachable with any realistic
+  // income, but an adversarial review flagged the gap between the stated
+  // guarantee and the code.
+  const raw = (incomeRatePerSecond * anchorSeconds) / referenceFirstTierUnlockCost
+  return Number.isFinite(raw) ? Math.max(1, raw) : 1
+}
+
+/**
  * Compounding-doubling "Improve Training" milestones. Crossing a level in
  * this list DOUBLES the cumulative training effect from that point forward
  * (stacking: crossing N milestones multiplies by 2^N). Levels were derived

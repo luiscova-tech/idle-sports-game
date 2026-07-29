@@ -11,7 +11,7 @@ import {
   PERMANENT_UPGRADES,
   type PermanentUpgradeLevels,
 } from '../engine/prestige'
-import { checkNewlyEarnedAchievements, assertNeverRewardType } from '../engine/achievements'
+import { checkNewlyEarnedAchievements, assertNeverRewardType, ACHIEVEMENTS } from '../engine/achievements'
 import {
   type VentureTierState,
   tierUpgradeCost,
@@ -19,6 +19,7 @@ import {
   TRAINING_MILESTONE_LEVELS,
   resolveVentureTierTick,
   tierIncomeRatePerSecond,
+  incomeRateAnchorMultiplier,
 } from '../engine/ventureTiers'
 import { matchOutcomeProbabilities, matchOutcomeProbabilitiesWithoutDrawTriple } from '../engine/winProbability'
 import {
@@ -32,6 +33,8 @@ import {
   createBaseballModule,
   type BaseballMatchState,
   BASEBALL_VENTURE_TIERS,
+  BASEBALL_COST_ANCHOR_SECONDS,
+  scaledBaseballTiers,
   inningsForBaseballTier,
   estimatedTicksForBaseballTier,
 } from '../sports/baseball/baseballModule'
@@ -176,6 +179,26 @@ function sanitizeLifetimeStats(value: unknown): LifetimeStats {
   }
 }
 
+/**
+ * Sanitizes a `baseballCostAnchorMultiplier` value of UNKNOWN shape into a
+ * valid multiplier — same `Number.isFinite`-over-`typeof` defensive pattern
+ * as `sanitizeLifetimeStats` above, for the identical reason: a save
+ * already AT the current schema version skips `migrate()` entirely (zustand
+ * only invokes it on a version MISMATCH), so a corrupted-but-current-version
+ * value (a hand-edited `null`/`NaN`/negative number) would otherwise sail
+ * straight through `merge()`'s blind spread and permanently poison every
+ * future baseball cost computed from it — this is the ONLY guard standing
+ * between a corrupted persisted value and that outcome, called from BOTH
+ * `merge()` (the always-runs path) and available for a migration step to
+ * reuse rather than re-deriving the same validity check. `< 1` is also
+ * rejected (not just non-finite) — `incomeRateAnchorMultiplier` never
+ * produces a value below its own `1` floor, so anything less than `1` here
+ * can only be corruption, never a legitimately-computed value.
+ */
+function sanitizeBaseballCostAnchorMultiplier(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1 ? value : 1
+}
+
 /** Which achievement ids (from `src/engine/achievements.ts`'s ACHIEVEMENTS)
  *  have been earned — flat across every achievement line, since ids are
  *  globally unique. Same lifetime persistence as LifetimeStats above. */
@@ -193,17 +216,25 @@ function createInitialAchievements(): AchievementsState {
  * their live levels, with the live Legacy `globalRevenueMultiplier` applied
  * — feeds the 'scaledRevenue' achievement reward variant (see
  * engine/achievements.ts's AchievementReward and CLAUDE.md's income-rate-
- * scaled-rewards amendment). Reuses `tierIncomeRatePerSecond`
- * (engine/ventureTiers.ts) per-tier — this function is just the "sum across
- * every tier of both sports" orchestration, which is inherently a store-
- * level concern (same reasoning as `LegacyPanel.tsx`'s/`FranchiseTab.tsx`'s
- * own combined-across-both-sports totals): the sport-agnostic engine layer
- * has no way to iterate "every sport," only one sport's own tier list at a
- * time.
+ * scaled-rewards amendment), AND (new, see CLAUDE.md's "income-rate-
+ * anchored entry costs" convention) is reused UNCHANGED as the exact same
+ * income-rate snapshot a sport's entry-point costs get re-anchored to —
+ * per that convention's own "do not write a second parallel calculation"
+ * rule. Reuses `tierIncomeRatePerSecond` (engine/ventureTiers.ts) per-tier
+ * — this function is just the "sum across every tier of both sports"
+ * orchestration, which is inherently a store-level concern (same reasoning
+ * as `LegacyPanel.tsx`'s/`FranchiseTab.tsx`'s own combined-across-both-
+ * sports totals): the sport-agnostic engine layer has no way to iterate
+ * "every sport," only one sport's own tier list at a time.
  *
  * Takes plain `{unlocked, managerHired, level}[]` arrays rather than the
  * store's own `VentureTier[]`/`BaseballVentureTier[]` types, so this stays
- * usable from anywhere without a circular-import concern.
+ * usable from anywhere without a circular-import concern. `baseballAnchorMultiplier`
+ * is likewise a plain number (not read from a closed-over store reference),
+ * so a migration step computing a HYPOTHETICAL rate against an OLD,
+ * pre-migration state (which may have no `baseballCostAnchorMultiplier`
+ * field at all yet) can pass `1` explicitly rather than needing a live
+ * store instance to read from.
  *
  * Deliberately NOT memoized or cached anywhere — every call recomputes from
  * whatever tier/legacy state is passed in, which is what lets the caller
@@ -217,6 +248,7 @@ function currentAggregateIncomeRatePerSecond(
   tiers: { unlocked: boolean; managerHired: boolean; level: number }[],
   baseballTiers: { unlocked: boolean; managerHired: boolean; level: number }[],
   legacyMultiplier: number,
+  baseballAnchorMultiplier: number,
 ): number {
   let total = 0
   for (let i = 0; i < tiers.length; i++) {
@@ -229,11 +261,12 @@ function currentAggregateIncomeRatePerSecond(
       soccerModule.ticksPerMatch,
     )
   }
+  const liveBaseballTiers = scaledBaseballTiers(baseballAnchorMultiplier)
   for (let i = 0; i < baseballTiers.length; i++) {
     total += tierIncomeRatePerSecond(
       baseballTiers[i],
       i,
-      BASEBALL_VENTURE_TIERS[i],
+      liveBaseballTiers[i],
       legacyMultiplier,
       matchOutcomeProbabilitiesWithoutDrawTriple,
       estimatedTicksForBaseballTier(i),
@@ -346,6 +379,32 @@ interface GameState {
    *  stays one currency across every sport, per this project's currency-
    *  separation-by-TYPE-not-by-sport principle. */
   baseballTiers: BaseballVentureTier[]
+  /**
+   * The per-save multiplicative rescale factor applied to
+   * `BASEBALL_VENTURE_TIERS`' four currency-scale fields (unlockCost,
+   * managerHireCost, upgradeBaseCost, baseRevenueMultiplier) — see
+   * `scaledBaseballTiers` (imported from baseballModule.ts) and CLAUDE.md's
+   * "income-rate-anchored entry costs" convention. `1` (a brand-new save's
+   * default, and every save's
+   * default before this convention existed) means baseball's costs read
+   * exactly as `BASEBALL_VENTURE_TIERS`' own hardcoded reference numbers —
+   * this field being `1` is a genuine no-op, not a placeholder.
+   *
+   * Established ONCE, either by `SCHEMA_MIGRATIONS[5]` (an existing save
+   * migrating past the point this convention was introduced, anchored to
+   * that save's SURVIVING income rate — soccer only, since baseball's own
+   * income is being reset to zero in the same step) or
+   * by staying at its initial `1` (a brand-new save, whose income rate is
+   * genuinely zero at creation — the SAME floor `incomeRateAnchorMultiplier`
+   * would compute anyway, just without needing to call it). Never silently
+   * recomputed afterward on every load — a moving target would be a worse
+   * player experience than a fixed, if elevated, one. `resetProgress()`'s
+   * full wipe resets this back to `1` (treating baseball's whole economy as
+   * starting over, same as every other field it resets); `resetForLegacy()`
+   * deliberately does NOT touch it, matching how that action already never
+   * touches any other part of baseball's independent state.
+   */
+  baseballCostAnchorMultiplier: number
   currencies: { revenue: number }
   legacy: LegacyState
   lifetimeStats: LifetimeStats
@@ -394,7 +453,7 @@ interface GameState {
  * resolved outcome, so tolerant reads are the right fix there, not a
  * migration step here.
  */
-const CURRENT_SCHEMA_VERSION = 5
+const CURRENT_SCHEMA_VERSION = 6
 
 /**
  * SCHEMA_MIGRATIONS[v] transforms a persisted state KNOWN to be shaped like
@@ -500,6 +559,133 @@ const SCHEMA_MIGRATIONS: Record<number, (state: any) => any> = {
     }
     return state
   },
+  // Version 5 -> 6: the "income-rate-anchored entry costs" fix (see
+  // CLAUDE.md's dedicated amendment for the full writeup). Baseball's tier
+  // costs were fixed absolute numbers, calibrated once against a
+  // hypothetical "typical" progression pace — but Revenue is ONE pool
+  // shared with soccer, so a player who'd built up substantial
+  // soccer-derived wealth/income could trivially afford baseball's entire
+  // ladder, defeating its intended "a real second commitment" feel
+  // (confirmed directly by the actual player). This step is a DELIBERATE,
+  // one-time, INTENTIONAL reset — not a bug, and not something a future
+  // session should ever "fix" by trying to restore a save's old baseball
+  // progress or its pre-anchor costs:
+  //   1. Snapshots the income rate that SURVIVES this reset — soccer only
+  //      (baseball's own income is EXCLUDED because it's about to be zeroed;
+  //      see the detailed rationale at the snapshot call below) — via the
+  //      exact same `currentAggregateIncomeRatePerSecond` used everywhere
+  //      else in this file, never a second parallel calculation (this
+  //      convention's founding rule). `tiers` is defensively treated as
+  //      empty unless it's ALREADY exactly the expected length (mirroring
+  //      `merge()`'s own guard below), `legacy.permanentUpgrades` falls back
+  //      to fresh defaults the same way `SCHEMA_MIGRATIONS[0]` does, and the
+  //      whole snapshot is try/caught — a migration step must never THROW on
+  //      a corrupted save (an uncaught throw is swallowed deep in zustand's
+  //      persist internals and silently discards the ENTIRE migration, far
+  //      worse than a safe fallback). `1` is passed as the baseball anchor
+  //      multiplier for this snapshot — moot here since baseball is passed as
+  //      `[]`, but it documents that pre-v6 saves priced baseball at unscaled
+  //      reference numbers regardless.
+  //   2. Derives `baseballCostAnchorMultiplier` from that snapshot via
+  //      `incomeRateAnchorMultiplier` — anchoring baseball's FIRST tier's
+  //      unlockCost to `BASEBALL_COST_ANCHOR_SECONDS` worth of the player's own
+  //      current combined income, floored at `1` (baseball's original,
+  //      unscaled numbers) so a near-zero-income save is never made
+  //      CHEAPER than its own carefully-simulated baseline — see that
+  //      function's own doc comment for the full reasoning.
+  //   3. Resets `baseballTiers` to `createInitialBaseballTiers()` —
+  //      completely fresh: every tier locked, level 1, zero
+  //      matches/cumulativeRevenue, no manager, matching a brand-new
+  //      player's starting state exactly. Per instruction, this is a
+  //      DELIBERATE wipe of baseball's own progress specifically — soccer's
+  //      `tiers`, the shared `currencies.revenue` balance itself, and
+  //      `legacy` are all left completely untouched by this step (the
+  //      spread at the end preserves everything not explicitly overridden).
+  //   4. Resets `lifetimeStats.baseballWins` to `0` (via
+  //      `sanitizeLifetimeStats`, so a corrupted `lifetimeStats` gets
+  //      repaired at the same time) — `totalWins`/`soccerWins` are
+  //      deliberately NOT touched, per instruction. This is a KNOWN,
+  //      ACCEPTED one-time break of the otherwise-usually-true invariant
+  //      `totalWins === soccerWins + baseballWins`: whatever fraction of
+  //      `totalWins` came from baseball wins earned before this reset stays
+  //      counted in `totalWins` forever (a lifetime accomplishment, per
+  //      that line's own established philosophy), while `baseballWins`
+  //      itself starts over from `0` so ITS OWN achievement line can be
+  //      genuinely re-earned under the corrected economy. Confirmed by grep
+  //      before writing this step: nothing else in this codebase assumes
+  //      that invariant holds — the three stats are always displayed and
+  //      thresholded completely independently.
+  //   5. Removes any baseball-specific achievement id — derived from
+  //      `ACHIEVEMENTS` by `statTracked === 'baseballWins'`, not hardcoded,
+  //      so a future baseball-specific achievement line is automatically
+  //      covered too — from `achievements.earnedIds`. The player re-earns
+  //      (and re-receives the reward for) those specific badges once
+  //      `baseballWins` crosses their threshold again. Every other earned
+  //      id (the combined `totalWins` line, the `soccerWins` line) is left
+  //      completely untouched, per instruction. No currency already granted
+  //      by a since-un-earned baseball achievement is clawed back — that
+  //      reward was a one-time historical grant, not an ongoing
+  //      entitlement, and clawing it back could push a save's Revenue
+  //      negative depending on what's since been spent.
+  5: (state: any) => {
+    const safeSoccerTiers =
+      Array.isArray(state?.tiers) && state.tiers.length === SOCCER_VENTURE_TIERS.length ? state.tiers : []
+    const permanentUpgrades = state?.legacy?.permanentUpgrades ?? createInitialPermanentUpgrades()
+    // Anchor to the income that SURVIVES this reset — soccer only (baseball's
+    // `[]` here). Baseball's own current income is deliberately EXCLUDED from
+    // the snapshot: this step is about to reset baseball to zero income, so
+    // counting the baseball income it's about to DESTROY would inflate the
+    // anchor and could WALL a baseball-heavy save's re-entry — Tee Time would
+    // be priced against a transient peak (soccer + soon-gone baseball) the
+    // player no longer has post-reset, instead of the income they'll actually
+    // fund the re-climb with. An adversarial review flagged this. This is
+    // still the SAME shared currentAggregateIncomeRatePerSecond (not a parallel
+    // calc — the instruction's rule), just evaluated against post-reset
+    // economic reality.
+    //
+    // Two defensive layers on top: (1) the soccer length guard above treats a
+    // wrong-shaped `tiers` as empty (income 0 -> floor -> multiplier 1); (2)
+    // the try/catch — the length guard ensures a right-length ARRAY but NOT
+    // that every element is a well-shaped object, and tierIncomeRatePerSecond
+    // dereferences `tier.unlocked`, which THROWS on a null/primitive element
+    // (a hand-edited/partially-corrupted save). An uncaught throw here is
+    // swallowed deep in zustand's persist hydrate and DISCARDS THE ENTIRE
+    // MIGRATION (silently reverting the player to fresh defaults — total loss
+    // of soccer/Revenue/Legacy), the exact failure this step's own comment
+    // above promises never to cause. Falling back to the floor (multiplier 1)
+    // on any throw lets the migration still complete: soccer/Revenue/Legacy
+    // preserved, baseball still reset. Both caught by adversarial review.
+    let baseballCostAnchorMultiplier = 1
+    try {
+      const persistingIncomeRate = currentAggregateIncomeRatePerSecond(
+        safeSoccerTiers,
+        [],
+        globalRevenueMultiplier(permanentUpgrades),
+        1,
+      )
+      baseballCostAnchorMultiplier = incomeRateAnchorMultiplier(
+        persistingIncomeRate,
+        BASEBALL_COST_ANCHOR_SECONDS,
+        BASEBALL_VENTURE_TIERS[0].unlockCost,
+      )
+    } catch {
+      baseballCostAnchorMultiplier = 1
+    }
+
+    const sanitizedLifetimeStats = sanitizeLifetimeStats(state?.lifetimeStats)
+    const baseballAchievementIds = new Set(
+      ACHIEVEMENTS.filter((a) => a.statTracked === 'baseballWins').map((a) => a.id),
+    )
+    const earnedIds = Array.isArray(state?.achievements?.earnedIds) ? state.achievements.earnedIds : []
+
+    return {
+      ...state,
+      baseballTiers: createInitialBaseballTiers(),
+      baseballCostAnchorMultiplier,
+      lifetimeStats: { ...sanitizedLifetimeStats, baseballWins: 0 },
+      achievements: { earnedIds: earnedIds.filter((id: string) => !baseballAchievementIds.has(id)) },
+    }
+  },
 }
 
 function migrateGameState(persistedState: unknown, version: number): unknown {
@@ -555,6 +741,13 @@ export const useGameStore = create<GameState>()(
       schemaVersion: CURRENT_SCHEMA_VERSION,
       tiers: createInitialTiers(createInitialLegacy().permanentUpgrades),
       baseballTiers: createInitialBaseballTiers(),
+      // A brand-new save starts at the floor (1 = baseball's original,
+      // unscaled reference numbers). A fresh player's income is genuinely
+      // zero at creation, so this is exactly what incomeRateAnchorMultiplier
+      // would compute anyway — no migration needed for a new save. See the
+      // field's own doc comment on GameState and CLAUDE.md's income-rate-
+      // anchored-costs convention.
+      baseballCostAnchorMultiplier: 1,
       currencies: { revenue: startingRevenue(createInitialLegacy().permanentUpgrades) },
       legacy: createInitialLegacy(),
       lifetimeStats: createInitialLifetimeStats(),
@@ -634,6 +827,7 @@ export const useGameStore = create<GameState>()(
                   s.tiers,
                   s.baseballTiers,
                   globalRevenueMultiplier(s.legacy.permanentUpgrades),
+                  s.baseballCostAnchorMultiplier,
                 ),
             )
 
@@ -680,6 +874,7 @@ export const useGameStore = create<GameState>()(
                   s.tiers,
                   s.baseballTiers,
                   globalRevenueMultiplier(s.legacy.permanentUpgrades),
+                  s.baseballCostAnchorMultiplier,
                 ),
             )
 
@@ -799,13 +994,18 @@ export const useGameStore = create<GameState>()(
       // is "total wins across every venture tier combined," not "every
       // soccer venture tier").
       tickBaseballTier: (tierId) => {
-        const { baseballTiers, legacy } = get()
+        const { baseballTiers, legacy, baseballCostAnchorMultiplier } = get()
         const tierIndex = baseballTiers.findIndex((t) => t.id === tierId)
         if (tierIndex === -1) return
         const tier = baseballTiers[tierIndex]
         if (!tier.unlocked) return
 
-        const config = BASEBALL_VENTURE_TIERS[tierIndex]
+        // The LIVE (per-save-anchored) config — not the raw
+        // BASEBALL_VENTURE_TIERS reference — so both per-tick and completion
+        // revenue scale by this save's own baseRevenueMultiplier anchor,
+        // keeping baseball's internal cost-vs-income pacing invariant while
+        // its absolute scale matches the player (see scaledBaseballTiers).
+        const config = scaledBaseballTiers(baseballCostAnchorMultiplier)[tierIndex]
         const legacyMultiplier = globalRevenueMultiplier(legacy.permanentUpgrades)
         const matchContext = {
           level: tier.level,
@@ -847,6 +1047,7 @@ export const useGameStore = create<GameState>()(
                   s.tiers,
                   s.baseballTiers,
                   globalRevenueMultiplier(s.legacy.permanentUpgrades),
+                  s.baseballCostAnchorMultiplier,
                 ),
             )
             return {
@@ -878,6 +1079,7 @@ export const useGameStore = create<GameState>()(
                   s.tiers,
                   s.baseballTiers,
                   globalRevenueMultiplier(s.legacy.permanentUpgrades),
+                  s.baseballCostAnchorMultiplier,
                 ),
             )
             return {
@@ -891,12 +1093,16 @@ export const useGameStore = create<GameState>()(
       },
 
       upgradeBaseballTier: (tierId) => {
-        const { baseballTiers, currencies } = get()
+        const { baseballTiers, currencies, baseballCostAnchorMultiplier } = get()
         const tierIndex = baseballTiers.findIndex((t) => t.id === tierId)
         if (tierIndex === -1) return
         const tier = baseballTiers[tierIndex]
         if (!tier.unlocked) return
-        const cost = tierUpgradeCost(BASEBALL_VENTURE_TIERS[tierIndex], tier.level)
+        // Anchored config (see tickBaseballTier's own comment) — upgradeBaseCost
+        // is one of the four scaled fields, so training costs track this
+        // save's re-anchored ladder, not the raw reference numbers.
+        const config = scaledBaseballTiers(baseballCostAnchorMultiplier)[tierIndex]
+        const cost = tierUpgradeCost(config, tier.level)
         if (currencies.revenue < cost) return
 
         const nextLevel = tier.level + 1
@@ -914,7 +1120,7 @@ export const useGameStore = create<GameState>()(
           let nextId = s.notifications.length ? Math.max(...s.notifications.map((n) => n.id)) + 1 : 1
           const newNotifications = crossedMilestones.map(() => ({
             id: nextId++,
-            message: `${BASEBALL_VENTURE_TIERS[tierIndex].name} Revenue 2x!`,
+            message: `${config.name} Revenue 2x!`,
           }))
           return {
             currencies: { revenue: s.currencies.revenue - cost },
@@ -925,12 +1131,13 @@ export const useGameStore = create<GameState>()(
       },
 
       hireManagerForBaseballTier: (tierId) => {
-        const { baseballTiers, currencies } = get()
+        const { baseballTiers, currencies, baseballCostAnchorMultiplier } = get()
         const tierIndex = baseballTiers.findIndex((t) => t.id === tierId)
         if (tierIndex === -1) return
         const tier = baseballTiers[tierIndex]
         if (!tier.unlocked || tier.managerHired) return
-        const cost = BASEBALL_VENTURE_TIERS[tierIndex].managerHireCost
+        // Anchored config (see tickBaseballTier's own comment).
+        const cost = scaledBaseballTiers(baseballCostAnchorMultiplier)[tierIndex].managerHireCost
         if (currencies.revenue < cost) return
 
         set((s) => ({
@@ -945,13 +1152,17 @@ export const useGameStore = create<GameState>()(
       // the exact same locked-card purchase pattern as every other tier
       // rather than a special "first tier is free" case.
       unlockBaseballTier: (tierId) => {
-        const { baseballTiers, currencies, legacy } = get()
+        const { baseballTiers, currencies, legacy, baseballCostAnchorMultiplier } = get()
         const tierIndex = baseballTiers.findIndex((t) => t.id === tierId)
         if (tierIndex === -1) return
         const tier = baseballTiers[tierIndex]
         if (tier.unlocked) return
+        // Anchored config (see tickBaseballTier's own comment) — the Legacy
+        // Veteran Discount still stacks on top of the anchored unlockCost,
+        // exactly as it did on the raw one.
         const cost = Math.round(
-          BASEBALL_VENTURE_TIERS[tierIndex].unlockCost * unlockCostMultiplier(legacy.permanentUpgrades),
+          scaledBaseballTiers(baseballCostAnchorMultiplier)[tierIndex].unlockCost *
+            unlockCostMultiplier(legacy.permanentUpgrades),
         )
         if (currencies.revenue < cost) return
 
@@ -977,6 +1188,12 @@ export const useGameStore = create<GameState>()(
           // purpose is a true "brand new player" state, which should mean
           // every sport, not just soccer.
           baseballTiers: createInitialBaseballTiers(),
+          // Baseball's cost anchor resets to the floor too — a true
+          // brand-new player's baseball economy starts over completely,
+          // original unscaled numbers included (see the field's doc comment
+          // on GameState). resetForLegacy() below deliberately does NOT
+          // touch it, matching how it never touches any other baseball state.
+          baseballCostAnchorMultiplier: 1,
           currencies: { revenue: startingRevenue(freshLegacy.permanentUpgrades) },
           legacy: freshLegacy,
           lifetimeStats: createInitialLifetimeStats(),
@@ -1130,6 +1347,7 @@ export const useGameStore = create<GameState>()(
         schemaVersion: state.schemaVersion,
         tiers: state.tiers,
         baseballTiers: state.baseballTiers,
+        baseballCostAnchorMultiplier: state.baseballCostAnchorMultiplier,
         currencies: state.currencies,
         legacy: state.legacy,
         lifetimeStats: state.lifetimeStats,
@@ -1204,6 +1422,31 @@ export const useGameStore = create<GameState>()(
         // migrate() already sanitized it, since re-validating an
         // already-valid object is a harmless no-op.
         merged.lifetimeStats = sanitizeLifetimeStats(merged.lifetimeStats)
+        // Same never-trust-the-shape treatment for baseball's cost anchor
+        // multiplier — a corrupted-but-current-version value (hand-edited
+        // null/NaN/negative, or simply absent on a save that somehow reports
+        // v6 without one) would otherwise poison every baseball cost derived
+        // from it (see scaledBaseballTiers). sanitizeBaseballCostAnchorMultiplier
+        // collapses anything invalid back to the 1 floor (original unscaled
+        // numbers), the safe default — never below it. Runs unconditionally,
+        // same as the lifetimeStats guard above.
+        merged.baseballCostAnchorMultiplier = sanitizeBaseballCostAnchorMultiplier(
+          merged.baseballCostAnchorMultiplier,
+        )
+        // `achievements` gets the same never-trust-the-shape guard as
+        // tiers/baseballTiers/lifetimeStats above — the ONE unconditionally-read
+        // persisted field that previously lacked one. SCHEMA_MIGRATIONS[5]
+        // hard-guards earnedIds, but that only runs on a version MISMATCH; a
+        // save already AT the current version with a corrupted `achievements`
+        // (a hand-edited `null`, or a non-array `earnedIds`) skips migrate()
+        // entirely and would crash on the first render (AchievementsPanel's
+        // `new Set(s.achievements.earnedIds)`) or the first tick
+        // (applyEarnedAchievements' `[...earnedIds]`). Falling back to fresh
+        // empty achievements is the same silently-keep-safe-defaults posture as
+        // the guards above. An adversarial review caught this gap.
+        if (!Array.isArray(merged.achievements?.earnedIds)) {
+          merged.achievements = createInitialAchievements()
+        }
         return merged
       },
     },

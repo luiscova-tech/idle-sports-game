@@ -2,6 +2,7 @@ import { useGameStore } from '../store/useGameStore'
 import {
   createBaseballModule,
   BASEBALL_VENTURE_TIERS,
+  scaledBaseballTiers,
   estimatedTicksForBaseballTier,
   type BaseballMatchState,
 } from '../sports/baseball/baseballModule'
@@ -46,7 +47,16 @@ interface BaseballVentureCardProps {
  *  is no equivalent concept to wire up here. */
 function BaseballVentureCard({ tierId }: BaseballVentureCardProps) {
   const tierIndex = BASEBALL_VENTURE_TIERS.findIndex((c) => c.id === tierId)
-  const config = BASEBALL_VENTURE_TIERS[tierIndex]
+  // The LIVE per-save-anchored config — NOT the raw BASEBALL_VENTURE_TIERS
+  // reference — so every cost this card DISPLAYS (unlock/manager/training)
+  // exactly matches what the store actually CHARGES (both derive from the
+  // same scaledBaseballTiers helper, keyed on the same
+  // baseballCostAnchorMultiplier). Using the raw reference here would show
+  // a player baseball's original numbers while the store charged the
+  // re-anchored ones — the exact display/charge mismatch this shared helper
+  // exists to prevent. See CLAUDE.md's "Income-rate-anchored entry costs".
+  const baseballCostAnchorMultiplier = useGameStore((s) => s.baseballCostAnchorMultiplier)
+  const config = scaledBaseballTiers(baseballCostAnchorMultiplier)[tierIndex]
   const tier = useGameStore((s) => s.baseballTiers[tierIndex])
   const revenue = useGameStore((s) => s.currencies.revenue)
   const legacy = useGameStore((s) => s.legacy)

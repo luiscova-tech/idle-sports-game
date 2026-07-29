@@ -21,7 +21,7 @@
 
 import type { SportModule, TickResult, MatchOutcome, MatchContext } from '../../engine/types'
 import { resolveMatchOutcomeWithoutDraw } from '../../engine/winProbability'
-import type { VentureTierConfig } from '../../engine/ventureTiers'
+import { type VentureTierConfig, scaledTierConfigs } from '../../engine/ventureTiers'
 
 /**
  * Baseball's opaque per-match state. Mirrors soccer's SoccerMatchState
@@ -478,6 +478,35 @@ export function createBaseballModule(
 }
 
 /**
+ * How many seconds of the player's CURRENT aggregate income rate baseball's
+ * FIRST tier (Tee Time) unlockCost should represent, when baseball's whole
+ * cost ladder is re-anchored to the player's economic reality (see
+ * CLAUDE.md's "Income-rate-anchored entry costs" convention and
+ * useGameStore.ts's `SCHEMA_MIGRATIONS[5]` / `incomeRateAnchorMultiplier`).
+ *
+ * 60s chosen deliberately: entering a whole second sport should read as "a
+ * real commitment" — about one full minute of your current combined
+ * earning power just to unlock the entry tier — not the fraction-of-a-
+ * second triviality that fixed absolute numbers became for a wealthy,
+ * soccer-rich player (the actual reported problem). It is NOT so large as to
+ * be a wall: one minute of income is plainly surmountable, and the ~4.6x
+ * per-tier growth already baked into BASEBALL_VENTURE_TIERS below then
+ * compounds that entry anchor into a genuinely steep late-game ladder on its
+ * own, exactly as the original design intended — this only relocates the
+ * ladder's absolute starting point to match the player, it never changes its
+ * shape (upgradeCostGrowth and every tier-to-tier ratio are preserved
+ * unscaled). Tunable in one place if the entry commitment should feel
+ * heavier/lighter; documented rather than magic so a future session knows
+ * it's a deliberate knob.
+ *
+ * This constant lives in baseball's own module (not the store) because "how
+ * big a commitment is entering THIS sport" is a per-sport design decision —
+ * a future third sport picks its own anchor-seconds the same way, per the
+ * standing convention.
+ */
+export const BASEBALL_COST_ANCHOR_SECONDS = 60
+
+/**
  * Baseball's venture tiers. Phase 1 (see CLAUDE.md's "Baseball" amendment)
  * shipped a small 3-tier VALIDATION SLICE at real age-level innings counts.
  * Phase 2 (see CLAUDE.md's "Baseball: Phase 2" amendment) completes the REAL
@@ -502,6 +531,22 @@ export function createBaseballModule(
  * are prestige-gated: every one remains directly Revenue-purchasable, per
  * this project's confirmed design decision to keep baseball fully
  * independent of the Legacy/prestige system.
+ *
+ * IMPORTANT — these absolute numbers are now the REFERENCE CURVE (the
+ * ladder's SHAPE), not necessarily the numbers a given player sees. As of
+ * the "Income-rate-anchored entry costs" amendment (see CLAUDE.md), a save
+ * carries a `baseballCostAnchorMultiplier` and the LIVE costs a player is
+ * charged/shown are `scaledBaseballTiers(multiplier)` — these four
+ * currency-scale fields (unlockCost/managerHireCost/upgradeBaseCost/
+ * baseRevenueMultiplier) each multiplied by that per-save anchor, which was
+ * derived once from the player's own aggregate income rate so entering the
+ * sport reads as a real commitment relative to THEIR economy rather than a
+ * fixed absolute that a soccer-rich player finds trivial. A multiplier of 1
+ * (a fresh save, or the floor case) means these reference numbers ARE the
+ * live numbers, unchanged. Every ratio here (tier-to-tier growth,
+ * revenue-to-cost pacing) is preserved by the scaling — only the absolute
+ * starting point moves — so the ~4.6-4.7x growth documented below still
+ * describes the live ladder's shape exactly.
  */
 export const BASEBALL_VENTURE_TIERS: VentureTierConfig[] = [
   {
@@ -683,4 +728,28 @@ export function estimatedTicksForBaseballTier(
   const averageOutProbability = (config.homeOutProbability + config.awayOutProbability) / 2
   const expectedAtBatsPerHalfInning = 3 / averageOutProbability
   return Math.round(expectedAtBatsPerHalfInning * 2 * inningsForBaseballTier(tierIndex))
+}
+
+/**
+ * Baseball's LIVE tier config ladder for a given per-save anchor multiplier:
+ * `BASEBALL_VENTURE_TIERS` (the reference curve above) rescaled by
+ * `anchorMultiplier` via the shared, sport-agnostic `scaledTierConfigs`
+ * (engine/ventureTiers.ts). See CLAUDE.md's "Income-rate-anchored entry
+ * costs" convention.
+ *
+ * This is the ONE authoritative place every consumer of baseball's ACTUAL
+ * costs derives from — the store's baseball actions AND income aggregation,
+ * and BaseballVentureCard.tsx's displayed costs — so the anchor can never be
+ * applied inconsistently (charged one way, displayed another). A multiplier
+ * of exactly `1` (a brand-new save, or any save predating this convention)
+ * reproduces `BASEBALL_VENTURE_TIERS` byte-for-byte: a pure pass-through, not
+ * a behavior change. `id`/`name`/`icon`/`upgradeCostGrowth` are unchanged;
+ * only the four currency-scale fields (unlockCost, managerHireCost,
+ * upgradeBaseCost, baseRevenueMultiplier) are scaled — see scaledTierConfigs'
+ * own doc comment for why scaling exactly those four (and NOT
+ * upgradeCostGrowth) relocates the ladder's absolute scale while preserving
+ * its shape/pacing byte-for-byte.
+ */
+export function scaledBaseballTiers(anchorMultiplier: number): VentureTierConfig[] {
+  return scaledTierConfigs(BASEBALL_VENTURE_TIERS, anchorMultiplier)
 }
