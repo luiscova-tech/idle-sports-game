@@ -1,4 +1,4 @@
-import { useGameStore } from '../store/useGameStore'
+import { useGameStore, totalFranchiseEarnings } from '../store/useGameStore'
 import LegacyPanel from './LegacyPanel'
 import AchievementsPanel from './AchievementsPanel'
 import './FranchiseTab.css'
@@ -36,7 +36,16 @@ function FranchiseTab() {
   // match play across both sports," not literally every Revenue increment
   // ever, matching cumulativeRevenue's own existing documented scope.
   const allTiers = [...tiers, ...baseballTiers]
-  const totalRevenueEarned = allTiers.reduce((sum, t) => sum + t.cumulativeRevenue, 0)
+  // Routed through the SAME canonical helper the Legacy panel's preview and
+  // the store's resetForLegacy() use. These now compute the identical
+  // quantity (they didn't before — this panel always summed both sports
+  // while the Legacy preview summed soccer only), so leaving a third
+  // unguarded copy of the sum here would be exactly the "one authoritative
+  // source" rule left half-applied. It also inherits the helper's
+  // non-finite guard: a corrupted tier missing `cumulativeRevenue` passes
+  // merge()'s length-only shape check and would otherwise render a bare NaN
+  // here, directly above a correct total in the Legacy panel.
+  const totalRevenueEarned = totalFranchiseEarnings(tiers, baseballTiers)
   const totalMatches = allTiers.reduce((sum, t) => sum + t.matchesCompleted, 0)
 
   const handleDevWipe = () => {

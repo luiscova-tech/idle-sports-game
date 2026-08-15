@@ -1,4 +1,4 @@
-import { useGameStore } from '../store/useGameStore'
+import { useGameStore, totalFranchiseEarnings } from '../store/useGameStore'
 import { calculateLegacyPoints, PERMANENT_UPGRADES, unlockCostMultiplier } from '../engine/prestige'
 import {
   SOCCER_VENTURE_TIERS,
@@ -6,6 +6,7 @@ import {
   allVisibleTiersUnlocked,
   MAX_POST_PRESTIGE_REVEALS,
 } from '../sports/soccer/soccerModule'
+import { BASEBALL_VENTURE_TIERS } from '../sports/baseball/baseballModule'
 import './LegacyPanel.css'
 
 // Distinct visual system from VentureCard on purpose (see index.css's
@@ -13,6 +14,7 @@ import './LegacyPanel.css'
 // entirely, earned by prestiging rather than by playing tiers directly.
 function LegacyPanel() {
   const tiers = useGameStore((s) => s.tiers)
+  const baseballTiers = useGameStore((s) => s.baseballTiers)
   const legacy = useGameStore((s) => s.legacy)
   const resetForLegacy = useGameStore((s) => s.resetForLegacy)
   const purchaseLegacyUpgrade = useGameStore((s) => s.purchaseLegacyUpgrade)
@@ -25,7 +27,12 @@ function LegacyPanel() {
   // as later prestiges reveal more tiers, this requires the larger visible
   // set unlocked too, with no per-stage special-casing here.
   const canResetForLegacy = allVisibleTiersUnlocked(tiers, legacy.prestigeCount)
-  const totalEarnings = tiers.reduce((sum, t) => sum + t.cumulativeRevenue, 0)
+  // The SAME shared input the store's resetForLegacy() feeds to
+  // calculateLegacyPoints — both sports' cumulativeRevenue, since a prestige
+  // now sacrifices both ladders (see totalFranchiseEarnings in the store).
+  // Deliberately one shared function rather than two matching sums, so the
+  // previewed number can never drift from the number actually granted.
+  const totalEarnings = totalFranchiseEarnings(tiers, baseballTiers)
   const previewGain = calculateLegacyPoints(totalEarnings)
 
   // One additional hidden tier reveals per completed prestige (see
@@ -55,21 +62,20 @@ function LegacyPanel() {
     const trainingNote =
       ' Every currently-unlocked tier\'s "Improve Training" level resets too, so your odds against ' +
       'each tier\'s opponents drop back down until you retrain.'
-    // Explicit, per an adversarial-review finding: Revenue is ONE shared
-    // pool spent/earned by both soccer AND baseball tiers — the "wipes all
-    // Revenue" clause below is easy to misread as "wipes soccer's Revenue"
-    // in a sentence otherwise entirely about the soccer ladder, but it
-    // really does zero out any baseball capital too, even though baseball
-    // tiers' own unlocked/level/manager progress is untouched by this
-    // reset. Disclosed here, before the (irreversible) action, so a player
-    // invested in both sports isn't surprised afterward.
+    // A prestige now resets BOTH sports (see the store's resetForLegacy).
+    // Spelled out explicitly and before the irreversible action, because
+    // baseball's reset is the harsher half: every baseball tier goes back to
+    // LOCKED including the first one (baseball has no free starting tier),
+    // so a player who has invested heavily there is giving up more than the
+    // soccer-only wording of this dialog used to imply.
     const baseballNote =
-      ' Your baseball tiers\' own unlock/training/manager progress is untouched, but since Revenue ' +
-      'is one shared pool, any Revenue you were banking toward baseball gets wiped along with everything else.'
+      ' Your baseball tiers reset too — every one of them goes back to locked (including ' +
+      `${BASEBALL_VENTURE_TIERS[0].name}), at level 1 with no manager, and their unlock costs re-price ` +
+      'to match your fresh start. Baseball earnings count toward the Legacy Points above.'
     const confirmed = window.confirm(
       `Reset for Legacy?\n\nThis wipes all Revenue and every soccer tier's level/unlocks/matches back ` +
         `to a fresh ${SOCCER_VENTURE_TIERS[0].name} start. You will gain ${previewGain} Legacy Points, ` +
-        `which are kept permanently along with any Legacy upgrades you've bought.${revealNote}${trainingNote}${baseballNote} This cannot be undone.`,
+        `which are kept permanently along with any Legacy upgrades you've bought.${revealNote}${trainingNote}${baseballNote} Your achievements and their progress are always kept. This cannot be undone.`,
     )
     if (confirmed) resetForLegacy()
   }
@@ -97,7 +103,8 @@ function LegacyPanel() {
         <div className="legacy-panel__reset-block">
           <p className="legacy-panel__preview">
             Resetting for Legacy now would grant <strong>{previewGain} Legacy Points</strong> (based on{' '}
-            {totalEarnings.toLocaleString()} total Revenue earned this run).
+            {totalEarnings.toLocaleString()} total Revenue earned across both sports). Both your soccer
+            and baseball ladders reset; achievements and Legacy upgrades are kept.
           </p>
           {nextTierToReveal ? (
             <p className="legacy-panel__reveal-note">

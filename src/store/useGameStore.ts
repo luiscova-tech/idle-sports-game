@@ -275,6 +275,87 @@ function currentAggregateIncomeRatePerSecond(
   return total
 }
 
+/**
+ * Derives baseball's per-save `baseballCostAnchorMultiplier` from a given
+ * economic state — the ONE authoritative implementation of "anchor baseball's
+ * entry costs to this much of the player's income rate," used by BOTH places
+ * that ever need to establish it: `SCHEMA_MIGRATIONS[5]` (the original v5->v6
+ * introduction of the convention) and `resetForLegacy()` (which re-anchors
+ * against the POST-reset economy — see that action's own comment). Extracted
+ * from the migration rather than reimplemented alongside it, per this
+ * project's repeated "two copies of the same economy math silently drift
+ * apart" bug history and the anchor convention's own founding rule.
+ *
+ * `soccerTiers`/`baseballTiers` are whatever tier state the anchor should be
+ * measured against — the CALLER decides which economy is the right basis
+ * (the migration passes soccer-only, since it's about to destroy baseball's
+ * income; resetForLegacy passes the post-reset arrays for both sports, since
+ * it destroys both). This function never assumes; it just measures what it's
+ * handed.
+ *
+ * Wrapped in a try/catch that falls back to the floor (`1` = baseball's
+ * unscaled reference numbers), because `tierIncomeRatePerSecond` dereferences
+ * `tier.unlocked` and THROWS on a null/primitive element — possible on a
+ * hand-edited/corrupted save whose array is the right LENGTH but has a
+ * malformed element. Inside a migration an uncaught throw is swallowed by
+ * zustand's persist hydrate and discards the ENTIRE migration (total loss of
+ * soccer/Revenue/Legacy); inside a store action it would abort the prestige
+ * mid-way. Falling back to the floor keeps both paths completing safely.
+ */
+function computeBaseballCostAnchorMultiplier(
+  soccerTiers: { unlocked: boolean; managerHired: boolean; level: number }[],
+  baseballTiers: { unlocked: boolean; managerHired: boolean; level: number }[],
+  permanentUpgrades: PermanentUpgradeLevels,
+): number {
+  try {
+    const incomeRate = currentAggregateIncomeRatePerSecond(
+      soccerTiers,
+      baseballTiers,
+      globalRevenueMultiplier(permanentUpgrades),
+      1,
+    )
+    return incomeRateAnchorMultiplier(
+      incomeRate,
+      BASEBALL_COST_ANCHOR_SECONDS,
+      BASEBALL_VENTURE_TIERS[0].unlockCost,
+    )
+  } catch {
+    return 1
+  }
+}
+
+/**
+ * The total earnings being GIVEN UP by a prestige — every soccer tier's plus
+ * every baseball tier's `cumulativeRevenue`. The single input to
+ * `calculateLegacyPoints` (engine/prestige.ts), shared by `resetForLegacy()`
+ * and `LegacyPanel.tsx`'s live preview so the number a player is shown can
+ * never drift from the number they actually receive (this project's standing
+ * drift-proof-preview pattern).
+ *
+ * Deliberately phrased as "being given up by this reset" rather than "this
+ * run's": for soccer it is always exactly this run (every prestige has
+ * always zeroed soccer's ledger), but on ONE transitional prestige per save
+ * baseball's half can span several soccer runs — see the "one-time baseball
+ * catch-up" note in CLAUDE.md for why that is accepted rather than migrated
+ * away. After that first post-change prestige the two halves are permanently
+ * in step, since both ledgers now reset together.
+ *
+ * Baseball is included because `resetForLegacy()` now SACRIFICES baseball's
+ * progress too (it used to reset only soccer) — the Legacy Points reward
+ * should reflect the full franchise's earnings being given up, not just one
+ * sport's. Achievement-granted Revenue is deliberately NOT part of this: it
+ * never enters any tier's `cumulativeRevenue`, matching that field's own
+ * long-standing documented per-tier scope.
+ */
+export function totalFranchiseEarnings(
+  soccerTiers: { cumulativeRevenue: number }[],
+  baseballTiers: { cumulativeRevenue: number }[],
+): number {
+  const sum = (acc: number, t: { cumulativeRevenue: number }) =>
+    acc + (Number.isFinite(t?.cumulativeRevenue) ? t.cumulativeRevenue : 0)
+  return soccerTiers.reduce(sum, 0) + baseballTiers.reduce(sum, 0)
+}
+
 /** Checks and grants any achievements that newly qualify given the current
  *  value of every tracked lifetime stat, applying rewards atomically.
  *  Deliberately called from BOTH of tickTier()'s branches below (not just
@@ -394,19 +475,24 @@ interface GameState {
    * hardcoded reference numbers — this field being `1` is a genuine no-op,
    * not a placeholder.
    *
-   * Established ONCE, either by `SCHEMA_MIGRATIONS[5]` (an existing save
-   * migrating past the point this convention was introduced, anchored to
-   * that save's SURVIVING income rate — soccer only, since baseball's own
-   * income is being reset to zero in the same step) or
-   * by staying at its initial `1` (a brand-new save, whose income rate is
-   * genuinely zero at creation — the SAME floor `incomeRateAnchorMultiplier`
-   * would compute anyway, just without needing to call it). Never silently
-   * recomputed afterward on every load — a moving target would be a worse
-   * player experience than a fixed, if elevated, one. `resetProgress()`'s
-   * full wipe resets this back to `1` (treating baseball's whole economy as
-   * starting over, same as every other field it resets); `resetForLegacy()`
-   * deliberately does NOT touch it, matching how that action already never
-   * touches any other part of baseball's independent state.
+   * Established ONCE PER ECONOMIC ERA, never silently recomputed on every
+   * load (a moving cost target would be a worse player experience than a
+   * fixed, if elevated, one). It is (re-)established at exactly three points,
+   * all of which go through the ONE shared
+   * `computeBaseballCostAnchorMultiplier` helper:
+   *   - `SCHEMA_MIGRATIONS[5]` — an existing save migrating past the point
+   *     this convention was introduced, anchored to that save's SURVIVING
+   *     income rate (soccer only, since baseball's own income is reset to
+   *     zero in that same step).
+   *   - `resetForLegacy()` — a prestige now resets BOTH sports, so the anchor
+   *     is recomputed against the POST-reset economy (in practice: no
+   *     managers anywhere, so income 0 -> floors back to `1`). Without this,
+   *     freshly-relocked baseball tiers would still be priced for wealth the
+   *     player just gave up.
+   *   - a brand-new save, which simply starts at `1` (its income rate is
+   *     genuinely zero at creation — the SAME floor the helper would compute
+   *     anyway, without needing to call it).
+   * `resetProgress()`'s full dev wipe likewise puts this back to `1`.
    */
   baseballCostAnchorMultiplier: number
   currencies: { revenue: number }
@@ -649,32 +735,22 @@ const SCHEMA_MIGRATIONS: Record<number, (state: any) => any> = {
     //
     // Two defensive layers on top: (1) the soccer length guard above treats a
     // wrong-shaped `tiers` as empty (income 0 -> floor -> multiplier 1); (2)
-    // the try/catch — the length guard ensures a right-length ARRAY but NOT
-    // that every element is a well-shaped object, and tierIncomeRatePerSecond
-    // dereferences `tier.unlocked`, which THROWS on a null/primitive element
-    // (a hand-edited/partially-corrupted save). An uncaught throw here is
+    // the try/catch inside computeBaseballCostAnchorMultiplier — the length
+    // guard ensures a right-length ARRAY but NOT that every element is a
+    // well-shaped object, and tierIncomeRatePerSecond dereferences
+    // `tier.unlocked`, which THROWS on a null/primitive element (a
+    // hand-edited/partially-corrupted save). An uncaught throw here is
     // swallowed deep in zustand's persist hydrate and DISCARDS THE ENTIRE
     // MIGRATION (silently reverting the player to fresh defaults — total loss
     // of soccer/Revenue/Legacy), the exact failure this step's own comment
     // above promises never to cause. Falling back to the floor (multiplier 1)
     // on any throw lets the migration still complete: soccer/Revenue/Legacy
     // preserved, baseball still reset. Both caught by adversarial review.
-    let baseballCostAnchorMultiplier = 1
-    try {
-      const persistingIncomeRate = currentAggregateIncomeRatePerSecond(
-        safeSoccerTiers,
-        [],
-        globalRevenueMultiplier(permanentUpgrades),
-        1,
-      )
-      baseballCostAnchorMultiplier = incomeRateAnchorMultiplier(
-        persistingIncomeRate,
-        BASEBALL_COST_ANCHOR_SECONDS,
-        BASEBALL_VENTURE_TIERS[0].unlockCost,
-      )
-    } catch {
-      baseballCostAnchorMultiplier = 1
-    }
+    const baseballCostAnchorMultiplier = computeBaseballCostAnchorMultiplier(
+      safeSoccerTiers,
+      [],
+      permanentUpgrades,
+    )
 
     const sanitizedLifetimeStats = sanitizeLifetimeStats(state?.lifetimeStats)
     const baseballAchievementIds = new Set(
@@ -1192,17 +1268,19 @@ export const useGameStore = create<GameState>()(
         const freshLegacy = createInitialLegacy()
         set({
           tiers: createInitialTiers(freshLegacy.permanentUpgrades),
-          // Baseball tiers ARE wiped by this full dev/debug reset (unlike
-          // resetForLegacy() below, which deliberately never touches them —
-          // see that action's own doc comment): this button's documented
-          // purpose is a true "brand new player" state, which should mean
-          // every sport, not just soccer.
+          // Baseball tiers are wiped here too — this button's documented
+          // purpose is a true "brand new player" state, which means every
+          // sport. resetForLegacy() below now also resets baseball (see that
+          // action's own comment); what still separates the two is Legacy
+          // itself: this wipes legacyPoints/permanentUpgrades as well, which
+          // a prestige never does.
           baseballTiers: createInitialBaseballTiers(),
           // Baseball's cost anchor resets to the floor too — a true
           // brand-new player's baseball economy starts over completely,
           // original unscaled numbers included (see the field's doc comment
-          // on GameState). resetForLegacy() below deliberately does NOT
-          // touch it, matching how it never touches any other baseball state.
+          // on GameState). Hardcoded `1` rather than routed through
+          // computeBaseballCostAnchorMultiplier because this reset has no
+          // surviving economy to measure at all, by definition.
           baseballCostAnchorMultiplier: 1,
           currencies: { revenue: startingRevenue(freshLegacy.permanentUpgrades) },
           legacy: freshLegacy,
@@ -1227,36 +1305,41 @@ export const useGameStore = create<GameState>()(
       // one more hidden tier, the same check requires that one unlocked
       // too, forever — no per-stage special-casing needed.
       //
-      // Deliberately touches ONLY soccer's `tiers` array — `baseballTiers`
-      // itself is untouched, in either direction: baseball tiers are never
-      // checked as part of the gate condition above, AND a successful
-      // soccer prestige never resets any baseball tier's unlocked/level/
-      // managerHired/cumulativeRevenue state.
+      // RESETS BOTH SPORTS. This action used to reset ONLY soccer's `tiers`,
+      // leaving baseball's unlocked/level/managerHired progress fully intact
+      // across a prestige. That was a real, player-confirmed bug, not a
+      // design choice: because Revenue is ONE shared pool, a developed
+      // baseball economy refilled the wallet almost immediately after every
+      // reset, so prestige stopped being the genuine restart-for-permanent-
+      // bonuses trade it exists to be. Both sports now reset together:
+      //   - soccer  -> createInitialTiers(permanentUpgrades) (unchanged; the
+      //     Fast Track permanent upgrade may still pre-unlock its first tiers)
+      //   - baseball -> createInitialBaseballTiers(), which puts ALL 11 tiers
+      //     back to LOCKED (Tee Time included — baseball deliberately has no
+      //     free starting tier the way soccer's Sunday League does, so a true
+      //     reset is fully locked, not "first tier free"), level 1, no
+      //     manager, zero matches/cumulativeRevenue, and a fresh match state.
+      //     Reusing that same helper is exactly how soccer's own reset works,
+      //     so neither sport can drift from "what a brand-new player has."
       //
-      // IMPORTANT — this independence does NOT extend to the shared
-      // currency, and an earlier version of this comment incorrectly
-      // implied it did (caught by adversarial review). `currencies.revenue`
-      // is ONE global pool spent/earned by both sports (see the
-      // GameState.baseballTiers doc comment) — the `currencies: {
-      // revenue: startingRevenue(...) }` a few lines below unconditionally
-      // resets the WHOLE balance, including whatever fraction of it a
-      // player earned via baseball or was saving toward a baseball tier's
-      // unlock/manager cost. This is an accepted, DISCLOSED consequence of
-      // sharing one currency across sports (a soccer prestige's whole
-      // point is trading away currently-banked wealth for Legacy Points,
-      // and that wealth is the same wallet baseball draws from too) — not
-      // something this action tries to route around, since doing so would
-      // require attributing a fungible, already-pooled-and-partially-spent
-      // balance back to "which sport earned this dollar," which isn't
-      // meaningfully possible without a much larger currency-tracking
-      // redesign out of scope for this validation slice. LegacyPanel.tsx's
-      // confirm dialog explicitly discloses this before the (irreversible)
-      // action, so a player invested in both sports isn't blindsided.
+      // `currencies.revenue` was ALREADY reset before this change (one shared
+      // pool — a prestige trades away all banked wealth regardless of which
+      // sport earned it); that behavior is unchanged, it just no longer
+      // stands alone as the only thing touching baseball.
+      //
+      // The gate condition is deliberately still SOCCER-ONLY
+      // (allVisibleTiersUnlocked over `tiers`): baseball is never gated by
+      // prestige in either direction — it isn't a prerequisite for
+      // prestiging, and prestige never gates baseball's unlocks. This change
+      // is about WHAT A RESET WIPES, not about adding any new gating.
       resetForLegacy: () => {
-        const { tiers, legacy } = get()
+        const { tiers, baseballTiers, legacy } = get()
         if (!allVisibleTiersUnlocked(tiers, legacy.prestigeCount)) return
 
-        const totalEarnings = tiers.reduce((sum, t) => sum + t.cumulativeRevenue, 0)
+        // Both sports' earnings feed the reward, since both are now being
+        // sacrificed — see totalFranchiseEarnings. The sqrt-based formula in
+        // calculateLegacyPoints itself is unchanged; only its INPUT grew.
+        const totalEarnings = totalFranchiseEarnings(tiers, baseballTiers)
         const gained = calculateLegacyPoints(totalEarnings)
 
         set((s) => {
@@ -1266,9 +1349,33 @@ export const useGameStore = create<GameState>()(
             hasPrestiged: true,
             prestigeCount: s.legacy.prestigeCount + 1,
           }
+          const nextTiers = createInitialTiers(nextLegacy.permanentUpgrades)
+          const nextBaseballTiers = createInitialBaseballTiers()
           return {
             legacy: nextLegacy,
-            tiers: createInitialTiers(nextLegacy.permanentUpgrades),
+            tiers: nextTiers,
+            baseballTiers: nextBaseballTiers,
+            // Re-anchor baseball's entry costs against the POST-reset economy
+            // (both arrays above, already reset), NOT the pre-reset one. The
+            // stored multiplier from before this prestige was anchored to
+            // wealth the player no longer has, so leaving it in place would
+            // price freshly-RELOCKED baseball tiers for an economy that just
+            // got wiped — a confusing, broken-feeling mismatch where Tee Time
+            // still costs millions on what is otherwise a fresh start. In
+            // practice the post-reset arrays have no managers hired, so
+            // `tierIncomeRatePerSecond` reports 0 for every tier and this
+            // floors to 1 (baseball's own unscaled reference numbers) — the
+            // correct pricing for a player starting over. It is computed from
+            // the real arrays rather than hardcoded to 1 so it stays correct
+            // by construction if a future permanent upgrade ever grants
+            // post-reset income (e.g. a pre-hired manager). Uses the SAME
+            // shared helper SCHEMA_MIGRATIONS[5] uses to establish this value
+            // in the first place — never a second, parallel derivation.
+            baseballCostAnchorMultiplier: computeBaseballCostAnchorMultiplier(
+              nextTiers,
+              nextBaseballTiers,
+              nextLegacy.permanentUpgrades,
+            ),
             currencies: { revenue: startingRevenue(nextLegacy.permanentUpgrades) },
           }
         })
