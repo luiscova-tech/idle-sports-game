@@ -2,6 +2,9 @@ import { useGameStore, visibleTierUnlockProgress } from '../store/useGameStore'
 import { nearestAchievementProgress } from '../engine/achievements'
 import { revealedTierCount, allVisibleTiersUnlocked } from '../sports/soccer/soccerModule'
 import { BASEBALL_VENTURE_TIERS } from '../sports/baseball/baseballModule'
+import soccerBuildingImage from '../assets/buildings/soccer-building.jpg'
+import baseballBuildingImage from '../assets/buildings/baseball-building.jpg'
+import franchiseHqBuildingImage from '../assets/buildings/franchise-hq-building.jpg'
 import './Hub.css'
 
 /** Which building the player tapped — mirrors Home.tsx's ViewId minus
@@ -35,9 +38,11 @@ interface HubProps {
  * If a future stat is added here, it must follow the same rule: reuse (or
  * extract) the screen's own derivation rather than recomputing it.
  *
- * The emoji icons are placeholder art, consistent with the tier cards' own
- * placeholders (see CLAUDE.md's tier-renaming amendment) — real illustrated
- * building art is step 9 work, deliberately not attempted here.
+ * Each building card's hero image is real illustrated art (see CLAUDE.md's
+ * "Hub building art" amendment) — scoped to these three hub cards only. The
+ * emoji placeholders used WITHIN each sport's own screen (venture tier
+ * cards, achievement badges) are untouched and out of scope here; step 9's
+ * broader placeholder-art pass is still pending for those.
  */
 function Hub({ onEnter }: HubProps) {
   const tiers = useGameStore((s) => s.tiers)
@@ -72,7 +77,8 @@ function Hub({ onEnter }: HubProps) {
   const buildings = [
     {
       id: 'soccer' as const,
-      icon: '⚽',
+      image: soccerBuildingImage,
+      imageAlt: 'Soccer stadium building',
       name: 'Soccer',
       tagline: 'Your football club',
       stats: [
@@ -93,7 +99,8 @@ function Hub({ onEnter }: HubProps) {
     },
     {
       id: 'baseball' as const,
-      icon: '⚾',
+      image: baseballBuildingImage,
+      imageAlt: 'Baseball park building',
       name: 'Baseball',
       tagline: 'Your ball club',
       stats: [
@@ -114,7 +121,8 @@ function Hub({ onEnter }: HubProps) {
     },
     {
       id: 'franchise' as const,
-      icon: '🏆',
+      image: franchiseHqBuildingImage,
+      imageAlt: 'Franchise headquarters building',
       name: 'Franchise HQ',
       tagline: 'Legacy & prestige',
       stats: [
@@ -147,29 +155,32 @@ function Hub({ onEnter }: HubProps) {
             className={`hub-building hub-building--${building.id}`}
             onClick={() => onEnter(building.id)}
           >
-            <span className="hub-building__icon" aria-hidden="true">
-              {building.icon}
+            <span className="hub-building__hero">
+              <img className="hub-building__image" src={building.image} alt={building.imageAlt} />
             </span>
-            <span className="hub-building__name">{building.name}</span>
-            <span className="hub-building__tagline">{building.tagline}</span>
 
-            <span className="hub-building__stats">
-              {building.stats.map((stat) => (
-                <span className="hub-stat" key={stat.label}>
-                  <span className="hub-stat__row">
-                    <span className="hub-stat__label">{stat.label}</span>
-                    <span className="hub-stat__value">{stat.value}</span>
-                  </span>
-                  {stat.percent !== undefined && (
-                    <span className="hub-stat__track">
-                      <span className="hub-stat__fill" style={{ width: `${stat.percent}%` }} />
+            <span className="hub-building__body">
+              <span className="hub-building__name">{building.name}</span>
+              <span className="hub-building__tagline">{building.tagline}</span>
+
+              <span className="hub-building__stats">
+                {building.stats.map((stat) => (
+                  <span className="hub-stat" key={stat.label}>
+                    <span className="hub-stat__row">
+                      <span className="hub-stat__label">{stat.label}</span>
+                      <span className="hub-stat__value">{stat.value}</span>
                     </span>
-                  )}
-                </span>
-              ))}
-            </span>
+                    {stat.percent !== undefined && (
+                      <span className="hub-stat__track">
+                        <span className="hub-stat__fill" style={{ width: `${stat.percent}%` }} />
+                      </span>
+                    )}
+                  </span>
+                ))}
+              </span>
 
-            <span className="hub-building__enter">Enter →</span>
+              <span className="hub-building__enter">Enter →</span>
+            </span>
           </button>
         ))}
       </div>
