@@ -1,39 +1,51 @@
 import { useState } from 'react'
 import { useGameStore } from '../store/useGameStore'
+import Hub, { type BuildingId } from '../components/Hub'
 import SoccerTab from '../components/SoccerTab'
 import BaseballTab from '../components/BaseballTab'
 import FranchiseTab from '../components/FranchiseTab'
 
-type TabId = 'soccer' | 'baseball' | 'franchise'
+/** 'hub' is the landing view; the other three are the building interiors —
+ *  the exact same content the old tab bar rendered, unchanged. */
+type ViewId = 'hub' | BuildingId
 
-const TABS: { id: TabId; label: string; icon: string }[] = [
-  { id: 'soccer', label: 'Soccer', icon: '⚽' },
-  { id: 'baseball', label: 'Baseball', icon: '⚾' },
-  { id: 'franchise', label: 'Franchise', icon: '🏆' },
-]
+const BUILDING_TITLES: Record<BuildingId, string> = {
+  soccer: '⚽ Soccer',
+  baseball: '⚾ Baseball',
+  franchise: '🏆 Franchise HQ',
+}
 
 /**
- * Three-tab main screen (see CLAUDE.md's tabbed-navigation amendment,
- * superseding the earlier single combined-list screen described in the
- * "Venture tiers" amendment). Tabs are plain component-local state, not
- * routes — switching tabs never touches react-router, so there is no
- * navigation event of any kind for useMatchTicker (mounted once in App.tsx,
- * unconditionally, above this component) to be affected by. That's a
- * stronger structural guarantee than the old /settings route ever had: it's
- * not just "the hook happens to live above the route," there is no route
- * transition here at all — every tab's tiers keep ticking in the store
- * regardless of which tab is currently rendered, since the auto-tick
- * intervals only ever call store actions directly and were never coupled to
- * what's mounted below. Verified directly in the browser regardless (see
- * CLAUDE.md) rather than assumed from this reasoning alone.
+ * Hub-based main screen (superseding the three-tab bar described in
+ * CLAUDE.md's tabbed-navigation amendment, which itself superseded the
+ * original single combined-list screen).
  *
- * Total Revenue stays in this persistent header, visible across all three
- * tabs — it's one shared currency (see useGameStore.ts's own currency-
- * separation-by-type-not-by-tab principle), not something scoped to any one
- * tab the way each tab's own achievement line or tier list is.
+ * NAVIGATION MODEL: the hub is the default/landing view on EVERY load —
+ * deliberately not "remember last screen." `useState<ViewId>('hub')` is
+ * component-local and never persisted (it's absent from the store entirely,
+ * so `partialize` can't carry it), so a reload always lands on the hub
+ * regardless of where the player was. Tapping a building FULLY REPLACES the
+ * view with that screen's existing content (not an overlay or drill-down),
+ * and every screen renders a persistent "back to hub" control.
+ *
+ * TECHNICAL APPROACH: this extends the existing component-local view-
+ * switching mechanism with one more state value rather than introducing URL
+ * routing — deliberately the lower-risk option, reusing what was already
+ * built and verified. The consequence that matters most is unchanged and
+ * strengthened: switching views is a plain `setState`, NOT a navigation
+ * event, so `useMatchTicker` (mounted once in App.tsx, unconditionally,
+ * above this component) is structurally untouchable by view changes. This
+ * project has hit a real navigation-pause regression before (the old
+ * /settings route), so that guarantee is re-verified in the browser each
+ * time this layer changes rather than assumed — see CLAUDE.md.
+ *
+ * Total Revenue stays in the persistent header, visible on the hub AND
+ * inside every building — it's one shared currency across both sports (see
+ * useGameStore.ts's currency-separation-by-type principle), not something
+ * scoped to any one screen the way each sport's tier list is.
  */
 function Home() {
-  const [activeTab, setActiveTab] = useState<TabId>('soccer')
+  const [view, setView] = useState<ViewId>('hub')
   const isInitialized = useGameStore((state) => state.isInitialized)
   const revenue = useGameStore((state) => state.currencies.revenue)
 
@@ -50,23 +62,22 @@ function Home() {
         </div>
       </header>
 
-      <nav className="tab-nav" aria-label="Main sections">
-        {TABS.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            className={`tab-nav__button ${activeTab === tab.id ? 'tab-nav__button--active' : ''}`}
-            aria-current={activeTab === tab.id ? 'page' : undefined}
-            onClick={() => setActiveTab(tab.id)}
-          >
-            <span aria-hidden="true">{tab.icon}</span> {tab.label}
-          </button>
-        ))}
-      </nav>
+      {view === 'hub' ? (
+        <Hub onEnter={setView} />
+      ) : (
+        <>
+          <div className="screen-bar">
+            <button type="button" className="back-to-hub" onClick={() => setView('hub')}>
+              <span aria-hidden="true">←</span> Back to hub
+            </button>
+            <h2 className="screen-bar__title">{BUILDING_TITLES[view]}</h2>
+          </div>
 
-      {activeTab === 'soccer' && <SoccerTab />}
-      {activeTab === 'baseball' && <BaseballTab />}
-      {activeTab === 'franchise' && <FranchiseTab />}
+          {view === 'soccer' && <SoccerTab />}
+          {view === 'baseball' && <BaseballTab />}
+          {view === 'franchise' && <FranchiseTab />}
+        </>
+      )}
     </div>
   )
 }

@@ -91,37 +91,28 @@
    combined-list screen. Plain component-local state in Home.tsx, not
    react-router — these are visual sections, not distinct pages. */
 
-.tab-nav {
+/* ---------- Screen bar (inside a hub building) ---------- */
+/* Replaces the old .tab-nav bar, removed when navigation moved from three
+   tabs to the hub model (see routes/Home.tsx). Shown only inside a
+   building's screen, never on the hub itself. */
+
+.screen-bar {
   display: flex;
-  gap: var(--space-2);
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
   margin-bottom: var(--space-4);
+  flex-wrap: wrap;
 }
 
-.tab-nav__button {
-  flex: 1;
-  font: inherit;
-  font-size: 0.9rem;
-  font-weight: 600;
-  color: var(--color-text-muted);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: var(--space-2) var(--space-3);
-  cursor: pointer;
-  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+.screen-bar__title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
 }
 
-.tab-nav__button:hover {
-  color: var(--color-text);
-  background: var(--color-muted-surface);
-}
-
-.tab-nav__button--active {
-  color: var(--color-primary);
-  background: var(--color-surface);
-  border-color: var(--color-primary);
-  box-shadow: var(--shadow-card);
-}
+/* .back-to-hub itself lives in components/Hub.css, alongside the hub
+   building styles it belongs with. */
 
 /* ---------- Franchise tab: Developer Tools section ---------- */
 /* Formerly a standalone /settings route's styles — folded into the

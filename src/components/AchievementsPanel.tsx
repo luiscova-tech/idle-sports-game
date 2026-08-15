@@ -3,6 +3,7 @@ import {
   ACHIEVEMENTS,
   STAT_LABELS,
   assertNeverRewardType,
+  nearestAchievementProgress,
   type AchievementReward,
   type StatKey,
 } from '../engine/achievements'
@@ -74,25 +75,27 @@ function AchievementsPanel({ statKeys }: AchievementsPanelProps) {
   const earnedIds = useGameStore((s) => s.achievements.earnedIds)
   const earnedSet = new Set(earnedIds)
 
-  const groups = new Map<StatKey, typeof ACHIEVEMENTS>()
+  // Which lines to render, in ACHIEVEMENTS' own declaration order. The
+  // per-line sorting/next-unearned/progress derivation itself lives in
+  // nearestAchievementProgress (engine/achievements.ts) rather than here,
+  // so Hub.tsx's at-a-glance teaser computes it from the exact same
+  // function this panel does — see that helper's own doc comment.
+  const lineKeys: StatKey[] = []
   for (const achievement of ACHIEVEMENTS) {
     if (statKeys && !statKeys.includes(achievement.statTracked)) continue
-    const line = groups.get(achievement.statTracked) ?? []
-    line.push(achievement)
-    groups.set(achievement.statTracked, line)
+    if (!lineKeys.includes(achievement.statTracked)) lineKeys.push(achievement.statTracked)
   }
 
   return (
     <section className="achievements-panel" aria-label="Achievements">
       <h2 className="achievements-panel__title">Achievements</h2>
 
-      {Array.from(groups.entries()).map(([statKey, lineAchievements]) => {
-        const sorted = [...lineAchievements].sort((a, b) => a.threshold - b.threshold)
-        const currentValue = stats[statKey] ?? 0
-        const nextUnearned = sorted.find((a) => !earnedSet.has(a.id))
-        const progressPercent = nextUnearned
-          ? Math.min(100, Math.round((currentValue / nextUnearned.threshold) * 100))
-          : 100
+      {lineKeys.map((statKey) => {
+        const { sorted, currentValue, nextUnearned, progressPercent } = nearestAchievementProgress(
+          stats,
+          earnedIds,
+          statKey,
+        )
 
         return (
           <div className="achievement-line" key={statKey}>

@@ -280,6 +280,58 @@ export const ACHIEVEMENTS: AchievementConfig[] = [
   },
 ]
 
+/**
+ * The state of ONE achievement line's progress toward its next unearned
+ * badge — see `nearestAchievementProgress` below.
+ */
+export interface AchievementLineProgress {
+  /** Every achievement in this line, ascending by threshold. */
+  sorted: AchievementConfig[]
+  /** The current value of the stat this line tracks. */
+  currentValue: number
+  /** The lowest-threshold achievement in this line not yet earned, or
+   *  `null` once every badge in the line is earned. */
+  nextUnearned: AchievementConfig | null
+  /** 0-100 progress toward `nextUnearned`'s threshold; exactly 100 when the
+   *  whole line is complete. */
+  progressPercent: number
+}
+
+/**
+ * Derives one achievement line's "closest badge + how far along" summary.
+ *
+ * THE SINGLE AUTHORITATIVE DERIVATION of that summary — used by BOTH
+ * `AchievementsPanel.tsx` (which renders the full line) and `Hub.tsx`'s
+ * at-a-glance teaser. It was originally computed inline inside
+ * AchievementsPanel; it lives here now specifically so the hub's teaser can
+ * never drift from the number the real screen shows for the same line
+ * (this project's standing "one authoritative source" rule — see the
+ * repeated drift bugs documented in CLAUDE.md). Adding a second copy of
+ * this arithmetic anywhere is exactly the mistake that rule exists to
+ * prevent.
+ *
+ * Pure: takes a plain stats record and the earned-id list, reads no store.
+ * `progressPercent` is clamped to 100 so a stat that has raced past the
+ * next threshold (before the grant tick runs) never renders an overflowing
+ * bar.
+ */
+export function nearestAchievementProgress(
+  stats: Record<string, number>,
+  earnedIds: readonly string[],
+  statKey: StatKey,
+): AchievementLineProgress {
+  const earnedSet = new Set(earnedIds)
+  const sorted = ACHIEVEMENTS.filter((a) => a.statTracked === statKey).sort(
+    (a, b) => a.threshold - b.threshold,
+  )
+  const currentValue = stats[statKey] ?? 0
+  const nextUnearned = sorted.find((a) => !earnedSet.has(a.id)) ?? null
+  const progressPercent = nextUnearned
+    ? Math.min(100, Math.round((currentValue / nextUnearned.threshold) * 100))
+    : 100
+  return { sorted, currentValue, nextUnearned, progressPercent }
+}
+
 /** Which of the not-yet-earned achievements now qualify, given the current
  *  value of every tracked stat. Pure — applies no rewards itself and
  *  mutates nothing; the caller (store) grants each returned achievement's

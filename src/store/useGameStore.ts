@@ -356,6 +356,38 @@ export function totalFranchiseEarnings(
   return soccerTiers.reduce(sum, 0) + baseballTiers.reduce(sum, 0)
 }
 
+/**
+ * How many of a sport's CURRENTLY-VISIBLE tiers are unlocked, as an
+ * `{unlocked, visible}` pair — the hub's "6/11 unlocked" readout.
+ *
+ * `visibleCount` is supplied by the caller because "how many tiers exist
+ * right now" is a per-sport rule, and each caller must pass the SAME value
+ * that sport's own screen renders with: soccer passes
+ * `revealedTierCount(prestigeCount)` (the identical function SoccerTab
+ * slices its card list with, so the hub's denominator can never disagree
+ * with the number of cards actually on screen), while baseball passes its
+ * full ladder length (BaseballTab renders every tier, revealed or not —
+ * baseball has no prestige-reveal mechanic). Deriving the count here from
+ * the live store array, rather than from any separately-tracked counter,
+ * is what keeps the numerator honest too.
+ *
+ * Tolerates a malformed element (a hand-edited save whose array is the
+ * right length but has a null/primitive entry) by simply not counting it,
+ * rather than throwing during a render — same never-trust-persisted-shape
+ * posture as `totalFranchiseEarnings` above.
+ */
+export function visibleTierUnlockProgress(
+  tiers: { unlocked: boolean }[],
+  visibleCount: number,
+): { unlocked: number; visible: number } {
+  const visible = Math.max(0, Math.min(visibleCount, tiers.length))
+  let unlocked = 0
+  for (let i = 0; i < visible; i++) {
+    if (tiers[i]?.unlocked) unlocked++
+  }
+  return { unlocked, visible }
+}
+
 /** Checks and grants any achievements that newly qualify given the current
  *  value of every tracked lifetime stat, applying rewards atomically.
  *  Deliberately called from BOTH of tickTier()'s branches below (not just
