@@ -101,3 +101,44 @@ export function useMatchTicker() {
     }
   }, [])
 }
+
+/**
+ * How often the Daily/Weekly boundary check wakes up. 30 seconds is chosen
+ * against what it is actually watching: a calendar-day rollover and a 7-day
+ * rolling window. A player crossing local midnight with the app open sees
+ * their new daily within half a minute — imperceptible against a 24-hour
+ * period — and the wake-up itself is close to free, because
+ * `refreshPeriodicObjectives` bails before touching any real work (or any
+ * `set()`, and therefore any localStorage write) whenever no boundary has
+ * passed, which is essentially always.
+ */
+const PERIODIC_OBJECTIVE_CHECK_MS = 30_000
+
+/**
+ * Drives the Daily/Weekly objective boundary check off the wall clock.
+ *
+ * Lives in this file, alongside the idle loop, on purpose: CLAUDE.md's
+ * standing convention is that this project's setIntervals live in exactly
+ * ONE module, so a future session looking for "what runs on a timer here"
+ * finds all of it in one place. It is a SEPARATE hook rather than more code
+ * inside useMatchTicker because it watches something completely different
+ * (the clock, not the tiers) at a completely different cadence, and must
+ * keep running even when not a single tier is auto-playing — which is
+ * precisely the case where it matters most, since with no managers hired
+ * there are no ticks at all to notice a rollover.
+ *
+ * Mounted once in App.tsx, above every screen, for the same reason
+ * useMatchTicker is: an idle game must not pause a timer because a menu is
+ * open. It also fires once immediately on mount, so a player returning after
+ * days away gets their fresh daily/weekly on the first frame rather than up
+ * to 30 seconds later.
+ */
+export function usePeriodicObjectives() {
+  const refreshPeriodicObjectives = useGameStore((s) => s.refreshPeriodicObjectives)
+
+  useEffect(() => {
+    refreshPeriodicObjectives()
+    const intervalId = setInterval(refreshPeriodicObjectives, PERIODIC_OBJECTIVE_CHECK_MS)
+    return () => clearInterval(intervalId)
+  }, [refreshPeriodicObjectives])
+}

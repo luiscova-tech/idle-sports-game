@@ -1,6 +1,6 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import Home from './routes/Home'
-import { useMatchTicker } from './hooks/useMatchTicker'
+import { useMatchTicker, usePeriodicObjectives } from './hooks/useMatchTicker'
 import NotificationToasts from './components/NotificationToasts'
 import './App.css'
 
@@ -15,6 +15,11 @@ function App() {
   // every tab — is an even stronger guarantee than before: there is no
   // route transition of any kind between tabs for it to be affected by.
   useMatchTicker()
+  // Mounted here for exactly the same reason, and with an extra one of its
+  // own: the Daily/Weekly boundary must keep being checked even when NO tier
+  // is auto-playing (no managers hired means no ticks at all, so nothing
+  // else would ever notice midnight passing).
+  usePeriodicObjectives()
 
   return (
     <BrowserRouter>

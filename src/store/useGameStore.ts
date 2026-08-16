@@ -16,6 +16,8 @@ import { scaledRevenueReward } from '../engine/economy'
 import {
   type ActiveObjective,
   type ObjectiveStatKey,
+  type PeriodicObjectiveKind,
+  type PeriodicObjectiveState,
   OBJECTIVE_STAT_SCOPES,
   objectiveConfigById,
   objectiveProgress,
@@ -23,6 +25,11 @@ import {
   sanitizeObjectives,
   resolveObjectiveTarget,
   ACTIVE_OBJECTIVE_TARGET,
+  createPeriodicObjectiveState,
+  periodicObjectiveConfigById,
+  resolvePeriodicObjective,
+  rebaselinePeriodicObjective,
+  sanitizePeriodicObjectiveState,
 } from '../engine/objectives'
 import {
   type VentureTierState,
@@ -470,6 +477,31 @@ function createInitialObjectives(permanentUpgrades: PermanentUpgradeLevels): Act
 }
 
 /**
+ * The first Daily / Weekly slot for a brand-new (or fully wiped) save.
+ *
+ * Baselined from the same real fresh-game state `createInitialObjectives`
+ * uses, for the same reason: a new save already has every tier at level 1,
+ * so baselining a training objective at zero would present it as instantly
+ * complete. Both boundary clocks are anchored to `nowMs`, so a player who
+ * starts at 23:58 gets their first daily reset two minutes later (the
+ * calendar-day rule, honestly applied) and their first weekly a full 7 days
+ * out.
+ */
+function createInitialPeriodicObjective(
+  kind: PeriodicObjectiveKind,
+  permanentUpgrades: PermanentUpgradeLevels,
+  nowMs: number = Date.now(),
+): PeriodicObjectiveState {
+  const stats = selectObjectiveStats(
+    createInitialTiers(permanentUpgrades),
+    createInitialBaseballTiers(),
+    createInitialLifetimeStats(),
+    0,
+  )
+  return createPeriodicObjectiveState(kind, stats, 0, nowMs)
+}
+
+/**
  * Grants any newly-complete objectives and refills the active set, applying
  * rewards atomically within the caller's own `set()` — the exact shape (and
  * the exact lazy `getIncomeRatePerSecond` thunk contract) as
@@ -591,6 +623,79 @@ function ensureObjectives(
 }
 
 /**
+ * Repairs a persisted Daily/Weekly slot at load time — the periodic
+ * counterpart of `ensureObjectives` above, and there for the identical
+ * reason: a save already AT the current schema version skips `migrate()`
+ * entirely, so `merge()` is the only place a corrupted-but-current slot ever
+ * gets looked at.
+ *
+ * Three repairs, in order of how badly they'd fail otherwise:
+ *  1. An unusable slot (missing, non-object, or with a non-string date /
+ *     non-finite timestamp) is replaced wholesale with a fresh one anchored
+ *     to now. Leaving it would crash the panel on the first render or freeze
+ *     the boundary forever. Crucially the replacement is baselined against
+ *     THIS SAVE'S live stats, not against the caller's fresh-game fallback:
+ *     that fallback is baselined for a brand-new player (totalTierLevels 22,
+ *     zero wins), so handing it to a veteran save would produce an INSTANTLY
+ *     COMPLETE objective that pays out on the next tick — and for the weekly
+ *     slot that is a free Legacy Point grant, repeatable by re-corrupting the
+ *     field. The fallback is therefore reserved for the throw path alone,
+ *     where no live stats snapshot could be obtained at all.
+ *  2. A structurally-valid slot whose OBJECTIVE is malformed (or names a
+ *     config this kind's pool doesn't have) keeps its boundary timestamps
+ *     and drops the objective to null — the next resolve redraws it without
+ *     also gifting a fresh period, which is what stops a corrupted save from
+ *     being a way to skip a weekly's 7-day wait.
+ *  3. A stale baseline ABOVE the live stat is re-baselined rather than
+ *     dropped. It would otherwise clamp at 0% and never complete, and
+ *     (unlike a rotating objective) nothing would rotate it out before its
+ *     boundary. Reachable whenever merge() falls back to fresh default tiers
+ *     while passing a persisted slot through verbatim.
+ * Wrapped so a throw can never break hydration, matching the rest of merge().
+ */
+function ensurePeriodicObjective(
+  kind: PeriodicObjectiveKind,
+  candidate: unknown,
+  tiers: VentureTier[],
+  baseballTiers: BaseballVentureTier[],
+  lifetimeStats: LifetimeStats,
+  prestigeCount: number,
+  permanentUpgrades: PermanentUpgradeLevels,
+  baseballCostAnchorMultiplier: number,
+  fallback: PeriodicObjectiveState,
+): PeriodicObjectiveState {
+  try {
+    const stats = selectObjectiveStats(tiers, baseballTiers, lifetimeStats, prestigeCount)
+    const sanitized = sanitizePeriodicObjectiveState(kind, candidate)
+    if (!sanitized) {
+      let rate = 0
+      try {
+        rate = currentAggregateIncomeRatePerSecond(
+          tiers,
+          baseballTiers,
+          globalRevenueMultiplier(permanentUpgrades),
+          baseballCostAnchorMultiplier,
+        )
+      } catch {
+        rate = 0
+      }
+      return createPeriodicObjectiveState(kind, stats, rate, Date.now())
+    }
+    const active = sanitized.objective
+    if (!active) return sanitized
+    const config = periodicObjectiveConfigById(kind, active.configId)
+    if (!config) return { ...sanitized, objective: null, completed: false }
+    const live = stats[config.statTracked] ?? 0
+    if (active.baseline > live) {
+      return { ...sanitized, objective: { ...active, baseline: live } }
+    }
+    return sanitized
+  } catch {
+    return fallback
+  }
+}
+
+/**
  * Rewrites the baseline of every RUN-SCOPED objective to the supplied
  * (post-reset) stats, leaving lifetime-scoped ones untouched — see
  * OBJECTIVE_STAT_SCOPES (engine/objectives.ts) for why the distinction
@@ -641,15 +746,97 @@ function rebaselineRunScopedObjectives(
  */
 function resolveObjectivesForState(
   objectives: readonly ActiveObjective[],
+  dailyObjective: PeriodicObjectiveState,
+  weeklyObjective: PeriodicObjectiveState,
   tiers: { unlocked: boolean; level: number; cumulativeRevenue: number }[],
   baseballTiers: { unlocked: boolean; level: number; cumulativeRevenue: number }[],
   lifetimeStats: LifetimeStats,
   prestigeCount: number,
   baseRevenue: number,
   getIncomeRatePerSecond: () => number,
-): { objectives: ActiveObjective[]; revenue: number; completedCount: number } {
+  nowMs: number = Date.now(),
+): ObjectiveResolution {
   const stats = selectObjectiveStats(tiers, baseballTiers, lifetimeStats, prestigeCount)
-  return applyCompletedObjectives(objectives, stats, baseRevenue, getIncomeRatePerSecond)
+  // ONE memoised rate snapshot shared by the rotating set AND both periodic
+  // slots, so several rewards landing in the same frame are all priced off
+  // the same instant of the economy — and so the (expensive) aggregate rate
+  // is computed at most once even when all three tiers pay out together.
+  let rate: number | null = null
+  const rateOnce = () => (rate ??= getIncomeRatePerSecond())
+
+  const rotating = applyCompletedObjectives(objectives, stats, baseRevenue, rateOnce)
+  const periodic = resolvePeriodicObjectivePair(
+    dailyObjective,
+    weeklyObjective,
+    stats,
+    nowMs,
+    rateOnce,
+  )
+  return {
+    objectives: rotating.objectives,
+    daily: periodic.daily,
+    weekly: periodic.weekly,
+    revenue: rotating.revenue + periodic.revenueReward,
+    legacyPointsReward: periodic.legacyPointsReward,
+    completedCount: rotating.completedCount + periodic.completedCount,
+  }
+}
+
+interface ObjectiveResolution {
+  objectives: ActiveObjective[]
+  daily: PeriodicObjectiveState
+  weekly: PeriodicObjectiveState
+  /** Absolute Revenue after every objective tier's rewards (the caller's
+   *  `baseRevenue` plus rotating plus daily plus weekly). */
+  revenue: number
+  /** Legacy Points to ADD — a delta, and non-zero ONLY when a weekly
+   *  objective completed (the rotating and daily tiers never carry any). */
+  legacyPointsReward: number
+  completedCount: number
+}
+
+/**
+ * Resolves BOTH periodic slots (grant + boundary reset) against one shared
+ * stats snapshot and one shared income-rate snapshot. See
+ * `resolvePeriodicObjective` (engine/objectives.ts) for the per-slot rules;
+ * this is purely the "there are two of them" wiring, kept in one place so
+ * the store's tick path, its purchase paths and the idle refresh action can
+ * never drift in how they evaluate the two.
+ */
+function resolvePeriodicObjectivePair(
+  daily: PeriodicObjectiveState,
+  weekly: PeriodicObjectiveState,
+  stats: Record<string, number>,
+  nowMs: number,
+  getIncomeRatePerSecond: () => number,
+): {
+  daily: PeriodicObjectiveState
+  weekly: PeriodicObjectiveState
+  revenueReward: number
+  legacyPointsReward: number
+  completedCount: number
+  /** True when anything at all changed — lets the idle refresh action skip
+   *  `set()` entirely on the overwhelmingly common no-op wake-up, so it
+   *  doesn't churn a re-render (or a localStorage write) every 30 seconds. */
+  changed: boolean
+} {
+  const d = resolvePeriodicObjective('daily', daily, stats, nowMs, getIncomeRatePerSecond)
+  const w = resolvePeriodicObjective('weekly', weekly, stats, nowMs, getIncomeRatePerSecond)
+  return {
+    daily: d.state,
+    weekly: w.state,
+    revenueReward: d.revenueReward + w.revenueReward,
+    legacyPointsReward: d.legacyPointsReward + w.legacyPointsReward,
+    completedCount: (d.granted ? 1 : 0) + (w.granted ? 1 : 0),
+    changed: d.state !== daily || w.state !== weekly,
+  }
+}
+
+/** Returns `legacy` unchanged when the point total is unchanged, so an
+ *  untouched Legacy object keeps its referential identity and doesn't cause
+ *  needless re-renders on the (vast majority of) frames that grant nothing. */
+function withLegacyPoints(legacy: LegacyState, nextPoints: number): LegacyState {
+  return nextPoints === legacy.legacyPoints ? legacy : { ...legacy, legacyPoints: nextPoints }
 }
 
 /** Checks and grants any achievements that newly qualify given the current
@@ -797,6 +984,23 @@ interface GameState {
    * restart or corrupt every in-flight objective.
    */
   objectives: ActiveObjective[]
+  /**
+   * The single active DAILY objective and its calendar-day boundary state
+   * (see PeriodicObjectiveState in engine/objectives.ts). Persisted for the
+   * same reason `objectives` is — it carries the baseline that makes "win
+   * 100 MORE matches today" mean anything — plus two more:
+   *   - `lastResetDate` IS the boundary. Losing it on reload would hand the
+   *     player a brand-new daily on every page refresh.
+   *   - `completed` is what stops an already-rewarded daily from being paid
+   *     again on the next tick.
+   */
+  dailyObjective: PeriodicObjectiveState
+  /** The single active WEEKLY objective and its rolling-7-day boundary. Same
+   *  reasoning as `dailyObjective`, and rather more load-bearing: this is
+   *  the only slot in the game that grants Legacy Points, so its
+   *  `lastResetMs` + `completed` pair is exactly what enforces "at most
+   *  WEEKLY_LEGACY_POINT_REWARD points per 7-day window". */
+  weeklyObjective: PeriodicObjectiveState
   notifications: MilestoneNotification[]
   tickTier: (tierId: string) => void
   upgradeTier: (tierId: string) => void
@@ -806,6 +1010,20 @@ interface GameState {
   upgradeBaseballTier: (tierId: string) => void
   hireManagerForBaseballTier: (tierId: string) => void
   unlockBaseballTier: (tierId: string) => void
+  /**
+   * Re-evaluates BOTH periodic slots against the wall clock — the idle
+   * counterpart to the evaluation the tick and purchase paths already do.
+   *
+   * Needed because a boundary can pass with nothing else happening at all: a
+   * player who leaves the app open past local midnight with no manager
+   * hired anywhere produces no ticks and no purchases, so without a timer
+   * their daily would sit expired until they next did something. Driven by
+   * `usePeriodicObjectives` (hooks/useMatchTicker.ts) and a no-op on the
+   * overwhelming majority of wake-ups — it skips `set()` entirely unless a
+   * boundary actually passed, so it costs nothing per-render or in
+   * localStorage writes.
+   */
+  refreshPeriodicObjectives: () => void
   resetProgress: () => void
   resetForLegacy: () => void
   purchaseLegacyUpgrade: (upgradeId: keyof typeof PERMANENT_UPGRADES) => void
@@ -841,7 +1059,7 @@ interface GameState {
  * resolved outcome, so tolerant reads are the right fix there, not a
  * migration step here.
  */
-const CURRENT_SCHEMA_VERSION = 7
+const CURRENT_SCHEMA_VERSION = 8
 
 /**
  * SCHEMA_MIGRATIONS[v] transforms a persisted state KNOWN to be shaped like
@@ -1126,6 +1344,69 @@ const SCHEMA_MIGRATIONS: Record<number, (state: any) => any> = {
 
     return { ...state, objectives }
   },
+  // Version 7 -> 8: the Daily and Weekly objective tiers (see the
+  // DAILY/WEEKLY section of engine/objectives.ts). Two genuinely new
+  // persisted fields — `dailyObjective` and `weeklyObjective`, each carrying
+  // its own objective, completion flag and reset boundary — which is exactly
+  // the case this project's schema-versioning convention exists for.
+  //
+  // An existing save must arrive with a full, VALID pair, not an empty or
+  // half-formed one, so both are generated here rather than left to a
+  // load-time self-heal. Three properties matter, and all three follow
+  // directly from how the rest of this system is specified:
+  //   1. BASELINED FROM THIS SAVE'S CURRENT STATS, never from zero — for the
+  //      identical reason SCHEMA_MIGRATIONS[6] does it for the rotating set:
+  //      a veteran save has hundreds of wins and dozens of tier levels
+  //      banked, and a zero baseline would present both new objectives as
+  //      already complete and pay them out (including the weekly's Legacy
+  //      Points) on the very next tick, for work done long before either
+  //      tier existed.
+  //   2. BOTH BOUNDARIES ANCHORED TO NOW, so the migrating player gets a
+  //      full fresh day and a full fresh 7 days starting from this load —
+  //      never a window that is already partly or wholly expired.
+  //   3. NO CATCH-UP, by construction: there is exactly one daily and one
+  //      weekly, regardless of how long the save sat unopened. Missed
+  //      periods are not a thing that can be owed.
+  // Same defensive shape as the two migration steps above: tier arrays are
+  // treated as empty unless already exactly the expected length, the
+  // null-tolerant `selectObjectiveStats` stays OUTSIDE the try, and only the
+  // throw-prone income-rate call is wrapped — an uncaught throw in a
+  // migration step is swallowed by zustand's persist hydrate and DISCARDS
+  // THE ENTIRE MIGRATION.
+  7: (state: any) => {
+    const safeSoccerTiers =
+      Array.isArray(state?.tiers) && state.tiers.length === SOCCER_VENTURE_TIERS.length ? state.tiers : []
+    const safeBaseballTiers =
+      Array.isArray(state?.baseballTiers) && state.baseballTiers.length === BASEBALL_VENTURE_TIERS.length
+        ? state.baseballTiers
+        : []
+    const permanentUpgrades = state?.legacy?.permanentUpgrades ?? createInitialPermanentUpgrades()
+    const prestigeCount = Number.isFinite(state?.legacy?.prestigeCount) ? state.legacy.prestigeCount : 0
+
+    const stats = selectObjectiveStats(
+      safeSoccerTiers,
+      safeBaseballTiers,
+      sanitizeLifetimeStats(state?.lifetimeStats),
+      prestigeCount,
+    )
+    let incomeRate = 0
+    try {
+      incomeRate = currentAggregateIncomeRatePerSecond(
+        safeSoccerTiers,
+        safeBaseballTiers,
+        globalRevenueMultiplier(permanentUpgrades),
+        sanitizeBaseballCostAnchorMultiplier(state?.baseballCostAnchorMultiplier),
+      )
+    } catch {
+      incomeRate = 0
+    }
+    const now = Date.now()
+    return {
+      ...state,
+      dailyObjective: createPeriodicObjectiveState('daily', stats, incomeRate, now),
+      weeklyObjective: createPeriodicObjectiveState('weekly', stats, incomeRate, now),
+    }
+  },
 }
 
 function migrateGameState(persistedState: unknown, version: number): unknown {
@@ -1196,6 +1477,10 @@ export const useGameStore = create<GameState>()(
       // baselined against real fresh-game state — so the Hub's Objectives
       // section is never empty, even on the very first render.
       objectives: createInitialObjectives(createInitialLegacy().permanentUpgrades),
+      // Both periodic slots exist from the very first render too, each with
+      // its boundary clock anchored to the moment the save was created.
+      dailyObjective: createInitialPeriodicObjective('daily', createInitialLegacy().permanentUpgrades),
+      weeklyObjective: createInitialPeriodicObjective('weekly', createInitialLegacy().permanentUpgrades),
       notifications: [],
 
       // Advances one tier's match by exactly one tick, via the same
@@ -1283,6 +1568,8 @@ export const useGameStore = create<GameState>()(
             // within one frame rather than one clobbering the other.
             const objectiveResult = resolveObjectivesForState(
               s.objectives,
+              s.dailyObjective,
+              s.weeklyObjective,
               updatedTiers,
               s.baseballTiers,
               { ...s.lifetimeStats, totalWins, soccerWins },
@@ -1302,8 +1589,14 @@ export const useGameStore = create<GameState>()(
               currencies: { revenue: objectiveResult.revenue },
               lifetimeStats: { ...s.lifetimeStats, totalWins, soccerWins },
               achievements: granted.grantedCount ? { earnedIds: granted.earnedIds } : s.achievements,
-              legacy: granted.grantedCount ? { ...s.legacy, legacyPoints: granted.legacyPoints } : s.legacy,
+              // Achievement Legacy Points and a completed WEEKLY objective's
+              // Legacy Points stack in the same frame — `granted.legacyPoints`
+              // already includes the balance plus any achievement award, so
+              // the weekly's delta is simply added on top.
+              legacy: withLegacyPoints(s.legacy, granted.legacyPoints + objectiveResult.legacyPointsReward),
               objectives: objectiveResult.objectives,
+              dailyObjective: objectiveResult.daily,
+              weeklyObjective: objectiveResult.weekly,
             }
           })
         } else {
@@ -1353,6 +1646,8 @@ export const useGameStore = create<GameState>()(
             // within one frame rather than one clobbering the other.
             const objectiveResult = resolveObjectivesForState(
               s.objectives,
+              s.dailyObjective,
+              s.weeklyObjective,
               updatedTiers,
               s.baseballTiers,
               s.lifetimeStats,
@@ -1371,8 +1666,10 @@ export const useGameStore = create<GameState>()(
               tiers: updatedTiers,
               currencies: { revenue: objectiveResult.revenue },
               achievements: granted.grantedCount ? { earnedIds: granted.earnedIds } : s.achievements,
-              legacy: granted.grantedCount ? { ...s.legacy, legacyPoints: granted.legacyPoints } : s.legacy,
+              legacy: withLegacyPoints(s.legacy, granted.legacyPoints + objectiveResult.legacyPointsReward),
               objectives: objectiveResult.objectives,
+              dailyObjective: objectiveResult.daily,
+              weeklyObjective: objectiveResult.weekly,
             }
           })
         }
@@ -1407,6 +1704,8 @@ export const useGameStore = create<GameState>()(
           // resolveObjectivesForState's own doc comment.
           const resolved = resolveObjectivesForState(
             s.objectives,
+            s.dailyObjective,
+            s.weeklyObjective,
             nextTiers,
             s.baseballTiers,
             s.lifetimeStats,
@@ -1420,12 +1719,19 @@ export const useGameStore = create<GameState>()(
                 s.baseballCostAnchorMultiplier,
               ),
           )
+          // Shared by both return shapes below — a purchase can complete a
+          // DAILY/WEEKLY objective just as it can a rotating one (training
+          // levels are one of the stats they track), so the periodic slots
+          // and any Legacy Points they granted must be written here too.
+          const objectiveFields = {
+            currencies: { revenue: resolved.revenue },
+            objectives: resolved.objectives,
+            dailyObjective: resolved.daily,
+            weeklyObjective: resolved.weekly,
+            legacy: withLegacyPoints(s.legacy, s.legacy.legacyPoints + resolved.legacyPointsReward),
+          }
           if (crossedMilestones.length === 0) {
-            return {
-              currencies: { revenue: resolved.revenue },
-              tiers: nextTiers,
-              objectives: resolved.objectives,
-            }
+            return { ...objectiveFields, tiers: nextTiers }
           }
           let nextId = s.notifications.length ? Math.max(...s.notifications.map((n) => n.id)) + 1 : 1
           const newNotifications = crossedMilestones.map(() => ({
@@ -1433,9 +1739,8 @@ export const useGameStore = create<GameState>()(
             message: `${SOCCER_VENTURE_TIERS[tierIndex].name} Revenue 2x!`,
           }))
           return {
-            currencies: { revenue: resolved.revenue },
+            ...objectiveFields,
             tiers: nextTiers,
-            objectives: resolved.objectives,
             notifications: [...s.notifications, ...newNotifications],
           }
         })
@@ -1487,6 +1792,8 @@ export const useGameStore = create<GameState>()(
           // count), so objectives resolve here too — not only on ticks.
           const resolved = resolveObjectivesForState(
             s.objectives,
+            s.dailyObjective,
+            s.weeklyObjective,
             nextTiers,
             s.baseballTiers,
             s.lifetimeStats,
@@ -1504,6 +1811,9 @@ export const useGameStore = create<GameState>()(
             currencies: { revenue: resolved.revenue },
             tiers: nextTiers,
             objectives: resolved.objectives,
+            dailyObjective: resolved.daily,
+            weeklyObjective: resolved.weekly,
+            legacy: withLegacyPoints(s.legacy, s.legacy.legacyPoints + resolved.legacyPointsReward),
           }
         })
       },
@@ -1595,6 +1905,8 @@ export const useGameStore = create<GameState>()(
             // within one frame rather than one clobbering the other.
             const objectiveResult = resolveObjectivesForState(
               s.objectives,
+              s.dailyObjective,
+              s.weeklyObjective,
               s.tiers,
               updatedTiers,
               { ...s.lifetimeStats, totalWins, baseballWins },
@@ -1614,8 +1926,10 @@ export const useGameStore = create<GameState>()(
               currencies: { revenue: objectiveResult.revenue },
               lifetimeStats: { ...s.lifetimeStats, totalWins, baseballWins },
               achievements: granted.grantedCount ? { earnedIds: granted.earnedIds } : s.achievements,
-              legacy: granted.grantedCount ? { ...s.legacy, legacyPoints: granted.legacyPoints } : s.legacy,
+              legacy: withLegacyPoints(s.legacy, granted.legacyPoints + objectiveResult.legacyPointsReward),
               objectives: objectiveResult.objectives,
+              dailyObjective: objectiveResult.daily,
+              weeklyObjective: objectiveResult.weekly,
             }
           })
         } else {
@@ -1650,6 +1964,8 @@ export const useGameStore = create<GameState>()(
             // within one frame rather than one clobbering the other.
             const objectiveResult = resolveObjectivesForState(
               s.objectives,
+              s.dailyObjective,
+              s.weeklyObjective,
               s.tiers,
               updatedTiers,
               s.lifetimeStats,
@@ -1668,8 +1984,10 @@ export const useGameStore = create<GameState>()(
               baseballTiers: updatedTiers,
               currencies: { revenue: objectiveResult.revenue },
               achievements: granted.grantedCount ? { earnedIds: granted.earnedIds } : s.achievements,
-              legacy: granted.grantedCount ? { ...s.legacy, legacyPoints: granted.legacyPoints } : s.legacy,
+              legacy: withLegacyPoints(s.legacy, granted.legacyPoints + objectiveResult.legacyPointsReward),
               objectives: objectiveResult.objectives,
+              dailyObjective: objectiveResult.daily,
+              weeklyObjective: objectiveResult.weekly,
             }
           })
         }
@@ -1702,6 +2020,8 @@ export const useGameStore = create<GameState>()(
           // count), so objectives resolve here too — not only on ticks.
           const resolved = resolveObjectivesForState(
             s.objectives,
+            s.dailyObjective,
+            s.weeklyObjective,
             s.tiers,
             nextBaseballTiers,
             s.lifetimeStats,
@@ -1715,12 +2035,17 @@ export const useGameStore = create<GameState>()(
                 s.baseballCostAnchorMultiplier,
               ),
           )
+          // See upgradeTier's identical block — a purchase can complete a
+          // periodic objective too, so both slots are written here as well.
+          const objectiveFields = {
+            currencies: { revenue: resolved.revenue },
+            objectives: resolved.objectives,
+            dailyObjective: resolved.daily,
+            weeklyObjective: resolved.weekly,
+            legacy: withLegacyPoints(s.legacy, s.legacy.legacyPoints + resolved.legacyPointsReward),
+          }
           if (crossedMilestones.length === 0) {
-            return {
-              currencies: { revenue: resolved.revenue },
-              baseballTiers: nextBaseballTiers,
-              objectives: resolved.objectives,
-            }
+            return { ...objectiveFields, baseballTiers: nextBaseballTiers }
           }
           let nextId = s.notifications.length ? Math.max(...s.notifications.map((n) => n.id)) + 1 : 1
           const newNotifications = crossedMilestones.map(() => ({
@@ -1728,9 +2053,8 @@ export const useGameStore = create<GameState>()(
             message: `${config.name} Revenue 2x!`,
           }))
           return {
-            currencies: { revenue: resolved.revenue },
+            ...objectiveFields,
             baseballTiers: nextBaseballTiers,
-            objectives: resolved.objectives,
             notifications: [...s.notifications, ...newNotifications],
           }
         })
@@ -1780,6 +2104,8 @@ export const useGameStore = create<GameState>()(
           // count), so objectives resolve here too — not only on ticks.
           const resolved = resolveObjectivesForState(
             s.objectives,
+            s.dailyObjective,
+            s.weeklyObjective,
             s.tiers,
             nextBaseballTiers,
             s.lifetimeStats,
@@ -1797,8 +2123,49 @@ export const useGameStore = create<GameState>()(
             currencies: { revenue: resolved.revenue },
             baseballTiers: nextBaseballTiers,
             objectives: resolved.objectives,
+            dailyObjective: resolved.daily,
+            weeklyObjective: resolved.weekly,
+            legacy: withLegacyPoints(s.legacy, s.legacy.legacyPoints + resolved.legacyPointsReward),
           }
         })
+      },
+
+      // The wall-clock half of the periodic system — see the interface
+      // declaration above for why a timer is needed at all alongside the
+      // tick/purchase evaluation.
+      //
+      // Reads once via get(), bails when nothing changed, and only then
+      // writes. That early bail is what keeps a 30-second heartbeat free:
+      // without it every wake-up would produce a new state object and, via
+      // the persist middleware, a fresh localStorage write forever. There is
+      // no await between the read and the write, so no other action can
+      // interleave — the state this computes against is the state it writes.
+      refreshPeriodicObjectives: () => {
+        const s = get()
+        const stats = selectObjectiveStats(s.tiers, s.baseballTiers, s.lifetimeStats, s.legacy.prestigeCount)
+        const resolved = resolvePeriodicObjectivePair(
+          s.dailyObjective,
+          s.weeklyObjective,
+          stats,
+          Date.now(),
+          () =>
+            currentAggregateIncomeRatePerSecond(
+              s.tiers,
+              s.baseballTiers,
+              globalRevenueMultiplier(s.legacy.permanentUpgrades),
+              s.baseballCostAnchorMultiplier,
+            ),
+        )
+        if (!resolved.changed) return
+
+        set((st) => ({
+          dailyObjective: resolved.daily,
+          weeklyObjective: resolved.weekly,
+          currencies: resolved.revenueReward
+            ? { revenue: st.currencies.revenue + resolved.revenueReward }
+            : st.currencies,
+          legacy: withLegacyPoints(st.legacy, st.legacy.legacyPoints + resolved.legacyPointsReward),
+        }))
       },
 
       // Wipes saved progress back to a brand-new player, INCLUDING Legacy —
@@ -1833,6 +2200,13 @@ export const useGameStore = create<GameState>()(
           // the store's own initial state uses, so a wiped save is
           // indistinguishable from a brand-new one here too.
           objectives: createInitialObjectives(freshLegacy.permanentUpgrades),
+          // Both periodic slots are wiped and re-anchored to now as well —
+          // this button's whole point is a state indistinguishable from a
+          // brand-new player's, which includes their day and week starting
+          // fresh rather than inheriting the old save's boundaries (or,
+          // worse, an already-claimed weekly).
+          dailyObjective: createInitialPeriodicObjective('daily', freshLegacy.permanentUpgrades),
+          weeklyObjective: createInitialPeriodicObjective('weekly', freshLegacy.permanentUpgrades),
         })
       },
 
@@ -1898,6 +2272,26 @@ export const useGameStore = create<GameState>()(
           }
           const nextTiers = createInitialTiers(nextLegacy.permanentUpgrades)
           const nextBaseballTiers = createInitialBaseballTiers()
+          // Computed once and shared by every re-baselining consumer below
+          // (the rotating array and both periodic slots), so the three can
+          // never disagree about what the post-reset economy looks like.
+          const postResetAnchor = computeBaseballCostAnchorMultiplier(
+            nextTiers,
+            nextBaseballTiers,
+            nextLegacy.permanentUpgrades,
+          )
+          const postResetStats = selectObjectiveStats(
+            nextTiers,
+            nextBaseballTiers,
+            s.lifetimeStats,
+            nextLegacy.prestigeCount,
+          )
+          const postResetIncomeRate = currentAggregateIncomeRatePerSecond(
+            nextTiers,
+            nextBaseballTiers,
+            globalRevenueMultiplier(nextLegacy.permanentUpgrades),
+            postResetAnchor,
+          )
           return {
             legacy: nextLegacy,
             tiers: nextTiers,
@@ -1918,11 +2312,7 @@ export const useGameStore = create<GameState>()(
             // post-reset income (e.g. a pre-hired manager). Uses the SAME
             // shared helper SCHEMA_MIGRATIONS[5] uses to establish this value
             // in the first place — never a second, parallel derivation.
-            baseballCostAnchorMultiplier: computeBaseballCostAnchorMultiplier(
-              nextTiers,
-              nextBaseballTiers,
-              nextLegacy.permanentUpgrades,
-            ),
+            baseballCostAnchorMultiplier: postResetAnchor,
             currencies: { revenue: startingRevenue(nextLegacy.permanentUpgrades) },
             // Re-baseline the RUN-SCOPED objectives against the post-reset
             // state, and leave lifetime-scoped ones (the win counters, which
@@ -1937,19 +2327,28 @@ export const useGameStore = create<GameState>()(
             // safety net. Targets are deliberately NOT re-resolved: the
             // player keeps the objective they were given, just measured from
             // the new starting line.
-            objectives: rebaselineRunScopedObjectives(
-              s.objectives,
-              selectObjectiveStats(nextTiers, nextBaseballTiers, s.lifetimeStats, nextLegacy.prestigeCount),
-              currentAggregateIncomeRatePerSecond(
-                nextTiers,
-                nextBaseballTiers,
-                globalRevenueMultiplier(nextLegacy.permanentUpgrades),
-                computeBaseballCostAnchorMultiplier(
-                  nextTiers,
-                  nextBaseballTiers,
-                  nextLegacy.permanentUpgrades,
-                ),
-              ),
+            objectives: rebaselineRunScopedObjectives(s.objectives, postResetStats, postResetIncomeRate),
+            // The Daily and Weekly slots deliberately SURVIVE a prestige
+            // rather than resetting with it: they are commitments to a
+            // period of real time, not to a run, and a player who prestiges
+            // on day 3 of a weekly should not lose the week (nor be able to
+            // reset a weekly they've already claimed by prestiging, which is
+            // what makes this the safe direction as well as the kind one).
+            // Only their baselines move, and only for run-scoped stats — the
+            // exact same correction the rotating array gets, and for the
+            // same reason: a prestige zeroes tier state, so a stale baseline
+            // would leave the objective permanently unachievable.
+            dailyObjective: rebaselinePeriodicObjective(
+              'daily',
+              s.dailyObjective,
+              postResetStats,
+              postResetIncomeRate,
+            ),
+            weeklyObjective: rebaselinePeriodicObjective(
+              'weekly',
+              s.weeklyObjective,
+              postResetStats,
+              postResetIncomeRate,
             ),
           }
         })
@@ -2044,6 +2443,8 @@ export const useGameStore = create<GameState>()(
         lifetimeStats: state.lifetimeStats,
         achievements: state.achievements,
         objectives: state.objectives,
+        dailyObjective: state.dailyObjective,
+        weeklyObjective: state.weeklyObjective,
       }),
       // The `tiers`-array-length shape fix that used to live here moved
       // into SCHEMA_MIGRATIONS[0] above — a genuine data transformation by
@@ -2154,6 +2555,36 @@ export const useGameStore = create<GameState>()(
           merged.legacy?.permanentUpgrades ?? createInitialPermanentUpgrades(),
           merged.baseballCostAnchorMultiplier,
           currentState.objectives,
+        )
+        // Both periodic slots get the same treatment, for the same
+        // skips-migrate()-at-the-current-version reason — and with rather
+        // more at stake for the weekly one, since a slot whose boundary
+        // fields were corrupted into unusability would otherwise either
+        // crash the panel or (if it defaulted permissively) hand out a fresh
+        // Legacy-Point-bearing objective on every single load. Falling back
+        // to `currentState`'s fresh slot anchors a repaired boundary to NOW,
+        // so a repair always costs a full period rather than granting one.
+        merged.dailyObjective = ensurePeriodicObjective(
+          'daily',
+          merged.dailyObjective,
+          merged.tiers,
+          merged.baseballTiers,
+          merged.lifetimeStats,
+          merged.legacy?.prestigeCount ?? 0,
+          merged.legacy?.permanentUpgrades ?? createInitialPermanentUpgrades(),
+          merged.baseballCostAnchorMultiplier,
+          currentState.dailyObjective,
+        )
+        merged.weeklyObjective = ensurePeriodicObjective(
+          'weekly',
+          merged.weeklyObjective,
+          merged.tiers,
+          merged.baseballTiers,
+          merged.lifetimeStats,
+          merged.legacy?.prestigeCount ?? 0,
+          merged.legacy?.permanentUpgrades ?? createInitialPermanentUpgrades(),
+          merged.baseballCostAnchorMultiplier,
+          currentState.weeklyObjective,
         )
         return merged
       },

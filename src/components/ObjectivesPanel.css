@@ -70,3 +70,56 @@
   background: var(--color-achievement);
   transition: width 0.2s ease;
 }
+
+/* Daily / Weekly sections — inside the SAME Objectives card as the rotating
+   list above, separated by a hairline rule rather than given their own
+   surface. They are the same kind of thing at a longer horizon, so they
+   read as sections of one list, not as competing panels. */
+
+.objectives__period {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
+
+.objectives__period-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.objectives__period-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-achievement);
+}
+
+.objectives__period-timer,
+.objectives__period-done {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.objectives__period-done {
+  margin: 0;
+  white-space: normal;
+}
+
+.objective__reward {
+  list-style: none;
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+
+/* The one place a Legacy Point amount appears outside Franchise HQ — given
+   the Legacy system's own purple/gold accent so it reads instantly as the
+   scarce permanent currency rather than more Revenue. */
+.objective__reward-legacy {
+  color: var(--color-legacy);
+  font-weight: 700;
+}
