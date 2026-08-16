@@ -1,10 +1,15 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import Home from './routes/Home'
-import { useMatchTicker, usePeriodicObjectives } from './hooks/useMatchTicker'
+import { useAppHeartbeat, useMatchTicker, usePeriodicObjectives } from './hooks/useMatchTicker'
 import NotificationToasts from './components/NotificationToasts'
 import './App.css'
 
 function App() {
+  // FIRST, deliberately: effects run in declaration order, and this one
+  // credits back any time the app spent CLOSED before the ticker below can
+  // fire ticks that would otherwise be judged against stale inactivity
+  // stamps. See useAppHeartbeat.
+  useAppHeartbeat()
   // Owns the idle loop regardless of which tab is active, so auto-play
   // keeps progressing while a player is on the Franchise tab (or any other
   // tab) — an idle game shouldn't pause its core loop just because a menu

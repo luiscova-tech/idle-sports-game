@@ -175,6 +175,42 @@ export function useMatchTicker() {
 const PERIODIC_OBJECTIVE_CHECK_MS = 30_000
 
 /**
+ * How often the app announces that it is still alive. Must stay comfortably
+ * BELOW `CLOSED_GAP_THRESHOLD_MS` (2min), since a gap larger than that is what
+ * the store reads as "the app was not running" — 30s leaves a 4x margin, wide
+ * enough that ordinary background-tab timer throttling can never be mistaken
+ * for a closure.
+ */
+const APP_HEARTBEAT_MS = 30_000
+
+/**
+ * Keeps `lastSeenMs` current so the unattended-auto-play pause counts only
+ * time the app was actually OPEN.
+ *
+ * Without this the threshold is raw wall clock, and since this game has no
+ * offline progress, a player who closed the tab overnight returned to find
+ * every managed tier paused over hours in which auto-play never ran — a
+ * behaviour adversarial review reproduced across two processes, and which the
+ * owner chose to change. The store action credits any detected closure back to
+ * every tier.
+ *
+ * Fires IMMEDIATELY on mount, before any tick can happen: the credit has to
+ * land before `useMatchTicker`'s intervals start firing, or the first ticks
+ * after a long closure would be judged against un-credited stamps. Mounted
+ * first in App.tsx for the same reason — effects run in declaration order, and
+ * this one must win.
+ */
+export function useAppHeartbeat() {
+  const recordAppHeartbeat = useGameStore((s) => s.recordAppHeartbeat)
+
+  useEffect(() => {
+    recordAppHeartbeat()
+    const id = setInterval(recordAppHeartbeat, APP_HEARTBEAT_MS)
+    return () => clearInterval(id)
+  }, [recordAppHeartbeat])
+}
+
+/**
  * Drives the Daily/Weekly objective boundary check off the wall clock.
  *
  * Lives in this file, alongside the idle loop, on purpose: CLAUDE.md's

@@ -40,6 +40,8 @@ import {
   tierIncomeRatePerSecond,
   incomeRateAnchorMultiplier,
   isAutoPlayPaused,
+  creditClosedTime,
+  CLOSED_GAP_THRESHOLD_MS,
 } from '../engine/ventureTiers'
 import { matchOutcomeProbabilities, matchOutcomeProbabilitiesWithoutDrawTriple } from '../engine/winProbability'
 import {
@@ -1015,7 +1017,26 @@ interface GameState {
    *  `lastResetMs` + `completed` pair is exactly what enforces "at most
    *  WEEKLY_LEGACY_POINT_REWARD points per 7-day window". */
   weeklyObjective: PeriodicObjectiveState
+  /**
+   * Epoch ms of the last app heartbeat — "when was this game last known to be
+   * actually running".
+   *
+   * Exists solely so the unattended-auto-play pause can count APP-OPEN time
+   * rather than raw wall clock. This game has no offline progress, so hours
+   * during which the app was closed must not accrue against a threshold whose
+   * whole purpose is stopping auto-play that has been RUNNING unattended.
+   * `useAppHeartbeat` refreshes this while the app lives; on the next load the
+   * gap since it reveals how long the app was gone, and that duration is
+   * credited back to every tier (see `creditClosedTime`).
+   */
+  lastSeenMs: number
   notifications: MilestoneNotification[]
+  /**
+   * Records that the app is alive right now, and credits back any time it was
+   * NOT alive. Called on mount and on a timer by `useAppHeartbeat`. A no-op
+   * for state beyond the heartbeat itself unless a real closure is detected.
+   */
+  recordAppHeartbeat: () => void
   /**
    * Advances one tier by a tick. `source` distinguishes the two callers of
    * this ONE shared resolution path (it has never been forked, and still
@@ -1083,7 +1104,7 @@ interface GameState {
  * resolved outcome, so tolerant reads are the right fix there, not a
  * migration step here.
  */
-const CURRENT_SCHEMA_VERSION = 9
+const CURRENT_SCHEMA_VERSION = 10
 
 /**
  * SCHEMA_MIGRATIONS[v] transforms a persisted state KNOWN to be shaped like
@@ -1459,6 +1480,25 @@ const SCHEMA_MIGRATIONS: Record<number, (state: any) => any> = {
         : tiers
     return { ...state, tiers: stamp(state?.tiers), baseballTiers: stamp(state?.baseballTiers) }
   },
+  // Version 9 -> 10: `lastSeenMs`, the app heartbeat behind counting only
+  // APP-OPEN time toward the unattended-auto-play pause (see
+  // `creditClosedTime`, engine/ventureTiers.ts).
+  //
+  // A version-9 save has no heartbeat at all, so there is no honest way to
+  // know how long it has been sitting closed — and its tier stamps may be
+  // days old for exactly that reason. Both are therefore reset to the
+  // migration moment, which is the same call SCHEMA_MIGRATIONS[8] made and
+  // for the same reason: a player must never open an update and find tiers
+  // already paused over time they had no way to avoid accruing. This is the
+  // one load where the closure cannot be measured, so it is forgiven whole.
+  9: (state: any) => {
+    const now = Date.now()
+    const stamp = (tiers: unknown) =>
+      Array.isArray(tiers)
+        ? tiers.map((t: any) => (t && typeof t === 'object' ? { ...t, lastInteractionMs: now } : t))
+        : tiers
+    return { ...state, lastSeenMs: now, tiers: stamp(state?.tiers), baseballTiers: stamp(state?.baseballTiers) }
+  },
 }
 
 function migrateGameState(persistedState: unknown, version: number): unknown {
@@ -1533,6 +1573,9 @@ export const useGameStore = create<GameState>()(
       // its boundary clock anchored to the moment the save was created.
       dailyObjective: createInitialPeriodicObjective('daily', createInitialLegacy().permanentUpgrades),
       weeklyObjective: createInitialPeriodicObjective('weekly', createInitialLegacy().permanentUpgrades),
+      // A brand-new save is alive as of right now, so its first heartbeat
+      // finds no gap to credit.
+      lastSeenMs: Date.now(),
       notifications: [],
 
       // Advances one tier's match by exactly one tick, via the same
@@ -2257,6 +2300,40 @@ export const useGameStore = create<GameState>()(
         })
       },
 
+      // Records that the app is alive, and credits back any stretch during
+      // which it was NOT — see `creditClosedTime` (engine/ventureTiers.ts) for
+      // why closed time must not count toward the auto-play pause.
+      //
+      // Reads via get() and bails before set() unless something actually
+      // needs writing, so the common heartbeat costs no re-render. The gap
+      // test is one comparison; the (rare) credit is a map over both tier
+      // arrays.
+      recordAppHeartbeat: () => {
+        const s = get()
+        const now = Date.now()
+        const last = s.lastSeenMs
+        // An absent/corrupt heartbeat is treated as "alive as of now" rather
+        // than as an infinite closure: crediting an unbounded gap would push
+        // every stamp to `now` and silently hand out a fresh window on any
+        // malformed save. Same never-trust-persisted-shape posture as the
+        // rest of this file.
+        const gap = Number.isFinite(last) && last > 0 && now > last ? now - last : 0
+        const closed = gap > CLOSED_GAP_THRESHOLD_MS
+
+        if (!closed) {
+          // Still cheap, but only worth a write if the stored value actually
+          // moved — otherwise a paused, idle app would re-persist forever.
+          if (s.lastSeenMs !== now) set({ lastSeenMs: now })
+          return
+        }
+
+        set((st) => ({
+          lastSeenMs: now,
+          tiers: creditClosedTime(st.tiers, gap, now),
+          baseballTiers: creditClosedTime(st.baseballTiers, gap, now),
+        }))
+      },
+
       // The wall-clock half of the periodic system — see the interface
       // declaration above for why a timer is needed at all alongside the
       // tick/purchase evaluation.
@@ -2334,6 +2411,7 @@ export const useGameStore = create<GameState>()(
           // worse, an already-claimed weekly).
           dailyObjective: createInitialPeriodicObjective('daily', freshLegacy.permanentUpgrades),
           weeklyObjective: createInitialPeriodicObjective('weekly', freshLegacy.permanentUpgrades),
+          lastSeenMs: Date.now(),
         })
       },
 
@@ -2572,6 +2650,7 @@ export const useGameStore = create<GameState>()(
         objectives: state.objectives,
         dailyObjective: state.dailyObjective,
         weeklyObjective: state.weeklyObjective,
+        lastSeenMs: state.lastSeenMs,
       }),
       // The `tiers`-array-length shape fix that used to live here moved
       // into SCHEMA_MIGRATIONS[0] above — a genuine data transformation by
@@ -2691,6 +2770,12 @@ export const useGameStore = create<GameState>()(
         // Legacy-Point-bearing objective on every single load. Falling back
         // to `currentState`'s fresh slot anchors a repaired boundary to NOW,
         // so a repair always costs a full period rather than granting one.
+        // A corrupt/absent heartbeat falls back to the fresh in-memory value
+        // (this load's start), so the next heartbeat measures a zero gap and
+        // credits nothing — never an unbounded closure from a garbage number.
+        if (!Number.isFinite(merged.lastSeenMs) || (merged.lastSeenMs as number) <= 0) {
+          merged.lastSeenMs = currentState.lastSeenMs
+        }
         merged.dailyObjective = ensurePeriodicObjective(
           'daily',
           merged.dailyObjective,

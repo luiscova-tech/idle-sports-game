@@ -148,6 +148,62 @@ export const UNATTENDED_AUTO_PLAY_PAUSE_MS = 4 * 60 * 60 * 1000
  * for doing nothing, that consumer needs its own paused-aware rate — not a
  * change here, which would reopen (1).
  */
+/**
+ * The largest gap between two app heartbeats that is still treated as the app
+ * having been OPEN and ticking.
+ *
+ * The heartbeat fires every `APP_HEARTBEAT_MS` while the app lives, so a
+ * foreground tab produces gaps of about that size, and even a
+ * background-throttled tab (browsers clamp timers to roughly once a second,
+ * or once a minute when deprioritised) stays comfortably under this. Anything
+ * LARGER means the app was not running — the tab was closed, discarded, or
+ * the machine slept — and that time is credited back to every tier rather
+ * than counted against it.
+ *
+ * The margin between the two constants is what makes this robust: it has to
+ * be wide enough that ordinary throttling never looks like a closure, and
+ * tight enough that a real closure is always caught. 30s vs 2min gives 4x.
+ */
+export const CLOSED_GAP_THRESHOLD_MS = 2 * 60 * 1000
+
+/**
+ * Shifts every tier's inactivity stamp FORWARD by `closedMs`, so time during
+ * which the app was not running does not count toward the pause threshold.
+ *
+ * WHY THIS EXISTS: the threshold is measured in wall clock from the last
+ * interaction, but this game has no offline progress — the ticker only runs
+ * while the app is open. Without this, a player who closed the tab in the
+ * morning and returned nine hours later found every managed tier paused on
+ * arrival, despite auto-play having run for none of those hours. Adversarial
+ * review reproduced exactly that across two processes, and the owner chose to
+ * count only app-open time. The mechanic is named for unattended AUTO-PLAY;
+ * if nothing was playing, nothing should have been accruing against it.
+ *
+ * Pure, and expressed as a forward shift of the stamp rather than as a
+ * separate accumulator, specifically so `isAutoPlayPaused` above — and every
+ * check already verified against it — stays byte-for-byte unchanged. A tier
+ * with no real stamp (`0`, negative, non-finite) is left exactly as it is:
+ * it is already fail-open, and inventing a stamp for it here would silently
+ * opt it INTO a mechanic it is deliberately outside of.
+ *
+ * Clamped at `nowMs` so a stamp can never be pushed into the future, which
+ * would make `nowMs - stamp` negative and read as an eternally-fresh tier.
+ */
+export function creditClosedTime<T extends { lastInteractionMs: number }>(
+  tiers: readonly T[],
+  closedMs: number,
+  nowMs: number,
+): T[] {
+  if (!Array.isArray(tiers)) return tiers as unknown as T[]
+  if (!Number.isFinite(closedMs) || closedMs <= 0) return [...tiers]
+  return tiers.map((tier) => {
+    const stamp = tier?.lastInteractionMs
+    if (!Number.isFinite(stamp) || (stamp as number) <= 0) return tier
+    const shifted = Math.min((stamp as number) + closedMs, Number.isFinite(nowMs) ? nowMs : (stamp as number))
+    return { ...tier, lastInteractionMs: shifted }
+  })
+}
+
 export function isAutoPlayPaused(
   tier: { unlocked: boolean; managerHired: boolean; lastInteractionMs: number },
   nowMs: number,
