@@ -172,8 +172,93 @@ const SCORE_BIAS_STRENGTH = 1.2
 const BIASED_PROBABILITY_MIN = 0.02
 const BIASED_PROBABILITY_MAX = 0.95
 
+/**
+ * ── THE COSMETIC SCORE BOUNDS ──
+ * These two constants bound the DISPLAYED score only. They are deliberately
+ * separate from MAX_MEANINGFUL_RUN_DIFFERENTIAL, which bounds the ECONOMIC
+ * signal (`resolvedMargin`, drawn by the fully-independent, fully-unbiased
+ * drawResolvedMargin above) — that path already had correct protection and is
+ * not touched by anything here.
+ *
+ * WHY THIS WAS NEEDED: the bias ramp below multiplies the favoured side's out
+ * probability by `1 - strength`, and `strength` reaches SCORE_BIAS_STRENGTH
+ * (1.2) late in a game — which is NEGATIVE, so it pinned the out probability
+ * at BIASED_PROBABILITY_MIN (0.02). At a 2% out probability a half-inning
+ * needs ~150 at-bats to reach three outs, and the favoured side scores on most
+ * of them. Measured against the real module before this fix: a 9-inning game
+ * averaged a **153-run** differential and peaked at **598-0**, with games
+ * running 876 at-bats against an estimate of 78. That is what produced the
+ * implausible scorelines visible on screen.
+ *
+ * COMFORTABLE_COSMETIC_LEAD is the real fix, and it is a shape fix rather than
+ * a clamp: the bias exists to ESTABLISH the correct winner, not to run up the
+ * score, so it switches off entirely once the favoured side is that far ahead,
+ * and back on if the lead is lost. Unbiased play is symmetric, so a held lead
+ * wobbles rather than compounding.
+ *
+ * The VALUE is 2, and it is load-bearing in a way a first pass missed. Because
+ * the bias keeps pushing until the favoured side leads by this much, a final
+ * margin SMALLER than it is structurally impossible — at 3, one-run games
+ * simply stopped existing (measured: 0.1% of 9-inning games, against ~28% of
+ * real MLB games decided by a single run). An adversarial review caught that,
+ * and it is exactly the kind of distribution defect a "max" bound alone would
+ * never reveal. Swept 1/2/3 over 20,000 games each; 2 is the balance point:
+ *
+ *   value | mean |diff| | 1-run games | mean runs | end-of-game corrections
+ *       1 |       2.44  |      39.0%  |      9.4  | 7.6%  (visible rewrites)
+ *       2 |       3.18  |      13.7%  |      9.6  | 0.01%
+ *       3 |       4.12  |       0.1%  |     10.2  | 0.00%
+ *
+ * At 2 the mean margin (3.18) and total runs (9.6) both land essentially on
+ * real MLB figures (~3.2 and ~8-9), and the score-correction path below
+ * effectively never fires. 1 gets one-run games closest to reality but pays
+ * for it with a visible end-of-game rewrite in ~1 game in 13, which is the
+ * very jank the bias exists to avoid. HONEST LIMITATION: 13.7% one-run games
+ * still under-represents MLB's ~28%. That is inherent to guaranteeing the
+ * winner via a bias at all, and is accepted rather than hidden.
+ *
+ * Game length also lands on the pre-existing estimatedTicksForBaseballTier
+ * figures (77.7 measured vs 78 for 9 innings, 25.4 vs 26 for 3) — see
+ * CLAUDE.md for why that agreement matters beyond the progress bar.
+ *
+ * MAX_COSMETIC_RUN_DIFFERENTIAL is a belt-and-braces hard ceiling. With the
+ * gate above it binds only in the far tail — measured maxima are 7 (3 inn),
+ * 13 (7 inn) and 14 (9 inn) over 5,000 games each, with an occasional 15 in
+ * larger samples, so it is a genuine bound rather than decoration, and an
+ * earlier draft of this comment claiming it "should essentially never bind"
+ * understated it (adversarial review).
+ * 15 is anchored to real baseball rather than picked: it is exactly the
+ * early-innings mercy-rule threshold used across amateur ball (15 runs after
+ * 3-4 innings in Little League and high school, alongside the more common
+ * 10-after-4-or-5), it is a routine-but-notable MLB blowout, and it sits far
+ * below the modern record margin of 27 (Rangers 30-3 over the Orioles, 22 Aug
+ * 2007 — the only 30-run game in MLB history) so the game can never look like
+ * it is breaking an all-time record every match.
+ */
+const COMFORTABLE_COSMETIC_LEAD = 2
+const MAX_COSMETIC_RUN_DIFFERENTIAL = 15
+
 function clampProbability(p: number): number {
   return Math.min(BIASED_PROBABILITY_MAX, Math.max(BIASED_PROBABILITY_MIN, p))
+}
+
+/**
+ * Whether HOME being ahead is consistent with the already-resolved outcome —
+ * i.e. whether a home walk-off may legitimately end the game.
+ *
+ * Both walk-off exits below fire purely on `homeScore > awayScore`, so without
+ * this a resolved LOSS could be ended by the home side happening to be ahead
+ * at the final inning, freezing a final score that contradicts the outcome
+ * badge beside it. Empirically that never happened across 63,000 measured
+ * games (the bias makes a resolved loser leading late very unlikely), but it
+ * was reachable BY CONSTRUCTION rather than prevented, and this project has
+ * shipped that exact display/outcome inconsistency class before. An
+ * adversarial review flagged it; closing it costs one comparison and makes the
+ * sign guarantee absolute rather than merely probable. When the outcome was
+ * never resolved (no opponentLevelRange supplied), any winner is consistent.
+ */
+function homeLeadEndsGame(resolvedOutcome: MatchOutcome | undefined): boolean {
+  return resolvedOutcome === undefined || resolvedOutcome === 'win'
 }
 
 /** Which side tick()'s flavor at-bats should currently favor — mirrors
@@ -289,7 +374,14 @@ function tick(
       ? config.homeScoreGivenNotOutProbability
       : config.awayScoreGivenNotOutProbability
 
-    if (favorsHome !== null) {
+    // The favoured side's CURRENT lead, which gates the bias below. See
+    // COMFORTABLE_COSMETIC_LEAD: the bias is there to establish the correct
+    // winner, not to run up the score, so it switches off once that side is
+    // comfortably ahead — and back on if the lead is given up.
+    const favouredLead =
+      favorsHome === null ? 0 : favorsHome ? homeScore - awayScore : awayScore - homeScore
+
+    if (favorsHome !== null && favouredLead < COMFORTABLE_COSMETIC_LEAD) {
       // Progress through the scheduled innings, not raw tick count (a
       // baseball match's real length in ticks is unknown in advance) —
       // 0 at the very first at-bat, approaching 1 by the last scheduled
@@ -309,16 +401,30 @@ function tick(
     if (Math.random() < outProbability) {
       outs += 1
     } else if (Math.random() < scoreGivenNotOutProbability) {
-      if (battingHome) homeScore += 1
-      else awayScore += 1
-      scoringEvent = true
+      // The hard ceiling (MAX_COSMETIC_RUN_DIFFERENTIAL): a side already
+      // ahead by the maximum plausible margin cannot extend it further. Only
+      // ever suppresses EXTENDING a lead — a trailing side scoring always
+      // counts, since that shrinks the differential. It cannot interfere with
+      // the walk-off below either, which fires on TAKING the lead, a state
+      // this can never block.
+      const battingLead = battingHome ? homeScore - awayScore : awayScore - homeScore
+      if (battingLead < MAX_COSMETIC_RUN_DIFFERENTIAL) {
+        if (battingHome) homeScore += 1
+        else awayScore += 1
+        scoringEvent = true
+      }
     }
 
     // Walk-off: home takes the lead DURING the bottom of the final/extra
     // inning — the game ends immediately, before necessarily reaching 3
     // outs, matching real baseball's "no need to bat further once already
     // ahead" rule.
-    if (half === 'bottom' && inning >= totalInnings && homeScore > awayScore) {
+    if (
+      half === 'bottom' &&
+      inning >= totalInnings &&
+      homeScore > awayScore &&
+      homeLeadEndsGame(resolvedOutcome)
+    ) {
       gameOver = true
     }
 
@@ -340,26 +446,47 @@ function tick(
         // for real extra innings) could silently break — an adversarial
         // review flagged this inconsistency, fixed here defensively even
         // though it changes no current behavior.
-        if (inning >= totalInnings && homeScore > awayScore) {
+        if (inning >= totalInnings && homeScore > awayScore && homeLeadEndsGame(resolvedOutcome)) {
           gameOver = true
         } else {
           half = 'bottom'
         }
       } else {
         if (inning >= totalInnings) {
-          if (homeScore !== awayScore) {
+          // End of regulation. The displayed score must agree in SIGN with
+          // resolvedOutcome, which is what actually decides the payout and
+          // what the Last Result badge shows — a final score contradicting
+          // the reported result is exactly the display/outcome inconsistency
+          // this project already had to fix once for soccer.
+          //
+          // Two cases need correcting, not one. A TIE is the obvious one:
+          // real baseball plays extra innings until decided, and the LIVE
+          // cosmetic game uses a cheap bounded nudge instead of simulating
+          // them (mirroring soccer's own final-tick nudge, for the same
+          // reason: a bounded tick budget for the displayed game), always by
+          // the smallest possible margin (1 run) so it reads as a plausible
+          // extra-innings walk-off rather than a jarring rewrite.
+          //
+          // The WRONG SIDE AHEAD is the second, and was previously unhandled:
+          // the old code ended the game on any non-tie, so a cosmetic score
+          // that had drifted against the resolved outcome was simply
+          // displayed as-is, contradicting the badge beside it. That was
+          // near-unreachable before, because the unbounded bias made the
+          // favoured side run away with every game; bounding the score (see
+          // COMFORTABLE_COSMETIC_LEAD) makes ordinary close games reachable,
+          // so it is handled explicitly rather than left to a property the
+          // bias no longer guarantees. Same minimal 1-run correction, which
+          // reads as a plausible late comeback.
+          const favouredIsHome = scoreBiasFavorsHome(resolvedOutcome)
+          const signAgrees =
+            favouredIsHome === null
+              ? homeScore !== awayScore
+              : favouredIsHome
+                ? homeScore > awayScore
+                : awayScore > homeScore
+          if (signAgrees) {
             gameOver = true
           } else {
-            // Tied after the scheduled length — real baseball plays extra
-            // innings until decided. The LIVE cosmetic game uses a cheap,
-            // bounded nudge instead of actually simulating further innings
-            // (mirroring soccer's own final-tick nudge safety net, for the
-            // same reason: a bounded tick budget for the live/displayed
-            // game), always by the smallest possible margin (1 run) so it
-            // reads as a plausible extra-innings walk-off rather than a
-            // jarring rewrite. drawResolvedMargin above, used only for the
-            // ECONOMIC signal, is under no such tick-budget constraint and
-            // DOES simulate real extra innings until decided.
             if (resolvedOutcome === 'win') homeScore = awayScore + 1
             else if (resolvedOutcome === 'loss') awayScore = homeScore + 1
             gameOver = true
@@ -416,12 +543,20 @@ export function getOutcome(state: BaseballMatchState): MatchOutcome {
  *  independently-calibrated threshold (baseball's shorter, lower-scoring
  *  simplified games produce smaller typical differentials than soccer's
  *  90-tick matches, so this is NOT simply copied from soccer's value of 5).
- *  Directly simulated (2,000 dead-even-matchup games, measuring the real
- *  resolvedMargin — the economic signal, not the cosmetic live score) at
- *  this value: P(a win's margin >= 4) ~= 13%, a genuine minority of wins,
- *  matching soccer's own "rare blowout tail" calibration philosophy for
- *  its equivalent constant — see CLAUDE.md's "Baseball" amendment for the
- *  full verification writeup. */
+ *  Directly simulated (dead-even matchups, measuring the real resolvedMargin
+ *  — the economic signal, not the cosmetic live score). RE-MEASURED at
+ *  20,000 games per inning-count, because the original "~13%" figure written
+ *  here dated from baseball's 3-tier Phase 1 slice and went stale when the
+ *  ladder grew to 11 tiers of which eight are 9-inning: the rate rises with
+ *  game length, since a longer game has more innings in which to build a
+ *  lead. P(a win's margin >= 4) is 2.5% at 3 innings, 11.9% at 6, 15.1% at
+ *  7 and 22.6% at 9 — a ladder-weighted 19.1% overall. Still a genuine
+ *  minority of wins, so the "rare blowout tail" philosophy this shares with
+ *  soccer's equivalent constant holds; the stale number understated it.
+ *  This constant and everything it feeds are DELIBERATELY untouched by the
+ *  cosmetic score bounds above — verified by measuring these same rates
+ *  against the committed pre-fix module and getting the same figures within
+ *  noise (22.28% vs 22.43% at 9 innings). */
 const MAX_MEANINGFUL_RUN_DIFFERENTIAL = 4
 
 /** Same drift-proof-preview reasoning and same resolvedMargin-over-live-

@@ -835,6 +835,86 @@ How it works, deliberately built to preserve everything already verified:
 - A direct-import Node harness (55 checks) covering: the exact boundary at −1ms / exactly at / +1ms, at half the threshold, and a week out; fail-open on `0`/negative/`NaN`/`Infinity`/`undefined` stamps, a non-finite `nowMs` and a rewound clock; locked and manager-less tiers never reported paused; the ≥4-matches-at-the-slowest-tier property; auto ticks frozen at the boundary with the match state byte-identical, `managerHired` intact and no Revenue accrued; an auto tick NOT re-stamping the clock; a manual tick working while paused, re-stamping, and auto-play resuming **from the frozen position**; the identical behaviour for baseball; all four purchase actions stamping their own tier; interacting with tier B NOT resuming tier A; the v8→v9 migration stamping every tier of both sports with the migration moment, nothing retroactively paused, a migrated tier auto-ticking immediately and getting a full fresh window before pausing normally, in-flight match state and every other field preserved, the blob re-persisted at v9 and the stamp genuinely persisted; the full unversioned→v9 chain; garbage stamps at the current version failing open, still ticking, and self-repairing on the next interaction; and both reset paths.
 - Every prior session's regression harness still passes (two stale hardcoded `schemaVersion === 8` assertions updated to 9 — the same class of stale assertion the last two sessions updated, not a regression).
 - Live browser (closed-app fix): seeded a real save whose interaction stamp AND heartbeat were both 9 hours old — exactly what a real closure leaves — and reopened. The Hub showed no pause warning, the card read `AUTO`, and auto-play advanced on its own with zero taps. Also: hired a manager, confirmed auto-play running, back-dated the stamp past 4 hours and reloaded — the card showed the amber `PAUSED` badge and the full explanatory note, and the match sat frozen at 1-1/minute 54 with unchanged Revenue and an intact manager across five real seconds. One click on "Push the Attack" advanced it to minute 55 (exactly +1, no lost progress), flipped the badge back to `AUTO` and the note back to "auto-advancing", and auto-play resumed on its own within the next few seconds. Amber confirmed as `--color-warning` (#b8790e) via `getComputedStyle`. Zero console errors.
+
+### Baseball: bounding the cosmetic score, and behaviourally proving the level-gap model
+
+Two investigations into `baseballModule.ts`, one a confirmed gap and one an unverified assumption. Both are match-resolution-adjacent — this project's highest-risk category — so both got the full treatment.
+
+**PART 1 — the cosmetic score was unbounded, and far worse than reported.** `MAX_MEANINGFUL_RUN_DIFFERENTIAL = 4` bounds the ECONOMIC signal (`resolvedMargin`), but nothing bounded the score actually shown to the player. Root cause: the bias ramp multiplies the favoured side's out probability by `1 - strength`, and `strength` reaches `SCORE_BIAS_STRENGTH` (1.2) late in a game — which is NEGATIVE, so the out probability pinned at `BIASED_PROBABILITY_MIN` (0.02). At a 2% out probability a half-inning needs ~150 at-bats to reach three outs, and the favoured side scores on most of them.
+
+Measured against the real module BEFORE the fix (level 5 vs 5):
+
+| tier length | mean \|diff\| | median | p99 | MAX | mean at-bats | max at-bats | estimate |
+|---|---|---|---|---|---|---|---|
+| 3 innings | 8.45 | 7 | 32 | **73** (0-73) | 35 | 114 | 26 |
+| 7 innings | 89.94 | 78 | 269 | **380** (0-380) | — | 614 | 61 |
+| 9 innings | 153.57 | 142 | 366 | **598** (598-0) | — | 876 | 78 |
+
+At 9 innings **100% of games exceeded a 10-run differential**. The reported 0-50 was, if anything, a mild example. Note the second symptom the same root cause produced: games ran up to 876 at-bats against a 78 estimate, so a managed 9-inning tier took roughly 11x longer per match than the pacing assumed, and the progress bar was meaningless.
+
+**The fix is a shape fix, not a clamp.** A pure ceiling was tried first and rejected on measurement: capping the differential at 15 left the mean AT 12-15, i.e. nearly every 9-inning game pinned to the ceiling — a 15-run blowout every single game is as implausible as a 500-run one, just less obviously so. What actually works is recognising what the bias is FOR: it exists to establish the correct winner, not to run up the score.
+- **`COMFORTABLE_COSMETIC_LEAD = 3`** gates the bias off entirely once the favoured side leads by 3, and back on if the lead is lost. Unbiased play is symmetric, so a held lead wobbles rather than compounding.
+- **`MAX_COSMETIC_RUN_DIFFERENTIAL = 15`** is a belt-and-braces hard ceiling (a side already ahead by 15 cannot extend it; a TRAILING side scoring always counts, since that shrinks the gap). The gate means it should essentially never bind.
+
+**15 is anchored to real baseball, not picked.** It is exactly the early-innings mercy-rule threshold used across amateur ball (15 runs after 3-4 innings in Little League and high school, alongside the more common 10-after-4-or-5); it is a routine-but-notable MLB blowout; and it sits far below the modern record margin of 27 — the Rangers' 30-3 win over the Orioles on 22 Aug 2007, still the only 30-run game in MLB history — so the game can never look like it is breaking an all-time record every match.
+
+**The gate value is 2, and adversarial review is why.** A first pass used 3 and looked good on every summary statistic — but because the bias keeps pushing until the favoured side leads by the gate value, a final margin SMALLER than it is structurally impossible. At 3, **one-run games simply stopped existing** (0.1% of 9-inning games, against ~28% of real MLB games decided by a single run). A "max" bound would never have revealed that; only looking at the whole distribution does. Swept 1/2/3 over 20,000 games each:
+
+| value | mean \|diff\| | 1-run games | mean total runs | end-of-game corrections |
+|---|---|---|---|---|
+| 1 | 2.44 | 39.0% | 9.4 | **7.6%** (visible rewrites) |
+| **2** | **3.18** | **13.7%** | **9.6** | **0.01%** |
+| 3 | 4.12 | 0.1% | 10.2 | 0.00% |
+
+2 is the balance point: mean margin and total runs land essentially on real MLB figures (~3.2 and ~8-9) while the score-correction path effectively never fires. 1 gets one-run games closest to reality but pays with a visible end-of-game rewrite in ~1 game in 13 — the very jank the bias exists to avoid. **Honest limitation:** 13.7% one-run games still under-represents MLB's ~28%. That is inherent to guaranteeing a winner via a bias at all, and is recorded rather than hidden.
+
+After the fix, same measurement:
+
+| tier length | mean \|diff\| | median | p95 | p99 | MAX | 1-run games | mean total runs | mean at-bats | estimate |
+|---|---|---|---|---|---|---|---|---|---|
+| 3 innings | 2.01 | 2 | 4 | 5 | 7 | 32.5% | 3.8 | 24.7 | 26 |
+| 7 innings | 2.93 | 3 | 6 | 8 | 13 | — | — | 59.6 | 61 |
+| 9 innings | 3.25 | 3 | 6 | 8 | 14 | 12.4% | 9.6 | 77.0 | 78 |
+
+Those means sit on MLB's real ~3.2-run average margin of victory, and game length now lands essentially exactly on the pre-existing `estimatedTicksForBaseballTier` figures — which matters far beyond the progress bar; see below.
+
+**The throughput question — three lenses called this a regression; measurement says it is the opposite.** The fix changes real match length by up to ~3.7x, and three independent review lenses flagged that as invalidating baseball's win-pacing and the Baseball Wins achievement thresholds. Checking which value the calibrations actually depend on settles it: `tierIncomeRatePerSecond` takes `estimatedTicksPerMatch` as a parameter, and `useGameStore` passes `estimatedTicksForBaseballTier` — **the estimate, not real ticks**. Every income rate, objective target, income-scaled reward and pacing simulation is therefore built on the estimate. Post-fix, real ticks match that estimate at a **0.95-0.99 ratio**, and measured wins/hour at managed tiers is **101-105%** of what the estimate-based calibration assumed. So the PRE-fix behaviour was the anomaly — real matches ran ~3.7x longer than every calibration believed, meaning baseball wins accrued far SLOWER than the thresholds were tuned for. The fix restores agreement rather than breaking it, and the Baseball Wins thresholds (75/300/1200) need no change.
+
+**A second, latent bug the fix exposed.** The end-of-regulation handler ended the game on ANY non-tie, correcting only ties. A cosmetic score that had drifted against `resolvedOutcome` was therefore DISPLAYED contradicting the outcome badge beside it — the same display/outcome inconsistency class the fifteenth amendment had to fix for soccer. It was near-unreachable under the old runaway bias (the favoured side ran away with every game), but bounding the score makes ordinary close games reachable, and calibration measured it at ~0.1% of 3-inning games. It now forces sign agreement using the same minimal 1-run correction previously reserved for ties, which reads as a plausible late comeback.
+
+Adversarial review then caught that this fix was **half-applied**, and four lenses converged on it: the two WALK-OFF exits end the game purely on `homeScore > awayScore` without consulting `resolvedOutcome`, so a resolved LOSS could still be ended by the home side happening to lead late. Measurement found zero such contradictions across 63,000 games (the bias makes a resolved loser leading late very unlikely) — but it was reachable BY CONSTRUCTION rather than prevented, which is precisely how this project has shipped this bug class before. Both exits are now gated on `homeLeadEndsGame(resolvedOutcome)`, making the guarantee absolute rather than probable. Verified: across level gaps -10 to +10, the final score's sign ALWAYS matches `getOutcome()`.
+
+**The economic path is provably untouched — measured, not argued.** `drawResolvedMargin` resimulates a fully UNBIASED game and never calls the biased rates, so nothing above can reach it. Confirmed empirically by extracting the COMMITTED pre-fix module and measuring both: P(margin >= 4 | win) at 9 innings is **22.28% pre-fix vs 22.43% post-fix**, the same within noise (7 innings 15.91% vs 15.60%; 3 innings 2.18% vs 2.20%).
+
+That comparison incidentally caught a **pre-existing stale doc comment**: `MAX_MEANINGFUL_RUN_DIFFERENTIAL` claimed "P(a win's margin >= 4) ~= 13%", a figure from baseball's 3-tier Phase 1 slice that went stale when the ladder grew to 11 tiers of which eight are 9-inning. Re-measured at 20,000 games per inning-count: **2.5% at 3 innings, 11.9% at 6, 15.1% at 7, 22.6% at 9 — a ladder-weighted 19.1%**. Still a genuine minority of wins, so the "rare blowout tail" philosophy holds; the old number simply understated it. Corrected in the comment, and flagged here as pre-existing rather than caused by this session.
+
+**Legacy in-flight matches need no migration — checked, not assumed.** A match persisted MID-GAME under the old behaviour can carry an absurd score (400-0, 0-517) into the new code. Verified directly: all such states complete normally rather than hanging (9-159 further at-bats), their `resolvedMargin` and therefore their payout are untouched by the stale cosmetic score, and a legacy score that CONTRADICTS its resolved outcome is corrected by the new sign-agreement handler (a persisted 5-305 with a resolved win finished 306-305). The one visible artifact is that a single already-in-flight match may still show its inherited large score until it completes and resets — a one-match cosmetic tail, which is why no schema migration is warranted.
+
+**PART 2 — the level-gap model reads training level correctly. Confirmed behaviourally, not by inspection.** The concern was that `tier.level` might not be reaching the win-probability calculation. It does. Simulating full matches through the real `tick()` path against a fixed opponent level 7, N=20,000 per level:
+
+| level | gap | theoretical win% | measured win% | delta |
+|---|---|---|---|---|
+| 1 | +6 | 3.25% | 3.20% | −0.05pp |
+| 2 | +5 | 5.89% | 6.25% | +0.36pp |
+| 3 | +4 | 10.70% | 10.62% | −0.08pp |
+| 5 | +2 | 33.25% | 33.52% | +0.27pp |
+| 7 | 0 | 66.67% | 66.51% | −0.16pp |
+| 9 | −2 | 83.28% | 83.19% | −0.09pp |
+| 11 | −4 | 92.30% | 92.34% | +0.04pp |
+| 15 | −8 | 99.03% | 98.98% | −0.04pp |
+| 20 | −13 | 99.94% | 99.98% | +0.03pp |
+
+**Pooled across all levels: 98,915 observed wins vs 98,860 expected, z = 0.43** — statistically indistinguishable from the model. Win rate is monotonic in level, and level demonstrably drives the result (L2 5.9% vs L12 95.3%).
+
+**A methodological note worth recording, because the first run looked like a bug and wasn't.** An initial pass flagged 3 of 9 levels as "outside the 95% CI" and nearly sent this down a false trail. That check was statistically unsound: nine independent 95% intervals raise a false alarm ~37% of the time by construction. Settled properly by (a) testing the resolution function in isolation at N=400,000 per level, and (b) running ten independent batches of 20,000 full matches at the flagged level — which pooled to **−0.112pp ± 0.207pp with alternating batch signs (`+---+-+---`)**, the signature of noise; a real bias would be one-signed. The harness now uses a Bonferroni correction per level plus an authoritative pooled z-test, so it cannot cry wolf the same way again.
+
+**Adversarial review (5 lenses × 2 independent skeptics; 18 candidates).** Three findings reproduced against the code as it then stood, and all three are addressed above: (1) the one-run-game distribution defect at gate value 3 — FIXED by moving to 2; (2) the half-applied sign fix bypassed by both walk-off exits — FIXED by gating them on `homeLeadEndsGame`; (3) the throughput change — ANSWERED by measurement showing it restores rather than breaks the calibration. Also corrected from review: the doc block's "max observed: 14 / should essentially never bind" understated the ceiling (a 15-run game does occur, rarely), now stated accurately. Not acted on: a claim that `getPerformanceFactor`'s `resolvedMargin ?? liveScore` fallback lets the bounds reach payout — technically true, but that fallback only fires when `opponentLevelRange` was never supplied, which the real store path always supplies; and a mid-match "Improve Training" expected-payout overstatement, which is pre-existing, unrelated to this change, and already documented behaviour (the preview uses the live level while the outcome was fixed at kickoff).
+
+**Verified — full adversarial/dual-verification treatment, per Testing Conventions.**
+- Build/lint clean.
+- A direct-import harness (32 checks) covering, at three tier lengths: the hard ceiling never exceeded across 15,000 games; realistic mean differentials; **the full margin DISTRIBUTION, not just its maximum** (one-run games must exist; total runs must be plausible) — the check that would have caught the gate-value-3 defect and now guards against its return; no game hitting a runaway tick cap; mean length within 25% of each tier's own estimate; bounds and sign-agreement holding at level gaps −10 to +10; the economic blowout rate matching the measured pre-fix baseline; `resolvedMargin` never approaching the cosmetic cap; no outcome ever paid below its flat base; the full level-vs-theory table with a pooled z-test; monotonicity; and that level demonstrably drives the outcome.
+- Every prior session's harness re-run and still passing.
+- Live browser: unlocked Tee Time and played eight full games by hand. Final scores were **3-1, 3-0, 2-0, 0-4, 0-4, 1-3, 1-4, 1-3** — every one a plausible baseball scoreline, max differential 4, sign always matching the reported outcome, 24-29 at-bats per 3-inning game against a 26 estimate. Zero console errors.
 ## Build Order (current status — update the checkboxes as work completes)
 - [x] 1. Scaffold React/Vite + Zustand, basic layout, empty store
 - [x] 2. Single-sport match-sim tick loop, one currency, minimal UI
