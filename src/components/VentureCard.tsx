@@ -239,6 +239,14 @@ function VentureCard<TState extends MatchStateEssentials>({
   // adversarial review correctly called out as something a polled clock
   // cannot promise.
   const autoPlayPaused = isAutoPlayPaused(tier, nowMs)
+  // NOTE ON THE PAUSED COPY BELOW: it says "no activity on this tier for N
+  // hours", NOT "this tier ran N hours without you". The threshold is
+  // measured in WALL CLOCK from the last interaction, and this game has no
+  // offline progress, so a tier can reach it having run for none of that time
+  // (the player simply closed the app). Adversarial review reproduced exactly
+  // that across two processes. The wording therefore has to be true whether
+  // the app was open or shut — see CLAUDE.md's open question on whether the
+  // threshold itself should count only app-open time.
 
   return (
     <div className="venture-card venture-card--unlocked" data-tier-id={tierId}>
@@ -346,9 +354,10 @@ function VentureCard<TState extends MatchStateEssentials>({
         {tier.managerHired ? (
           autoPlayPaused ? (
             <p className="venture-card__auto-note venture-card__auto-note--paused">
-              ⏸ Auto-play paused — this tier ran {UNATTENDED_AUTO_PLAY_PAUSE_MS / 3_600_000} hours without you.
-              Your manager and match progress are safe. Tap {actionLabel} to resume — that always works and
-              costs nothing; buying anything on this tier resumes it too.
+              ⏸ Auto-play paused — no activity on this tier for{' '}
+              {UNATTENDED_AUTO_PLAY_PAUSE_MS / 3_600_000} hours. Your manager and match progress are safe.
+              Tap {actionLabel} to resume — that always works and costs nothing; buying anything on this
+              tier resumes it too.
             </p>
           ) : (
             <p className="venture-card__auto-note">Manager hired — auto-advancing.</p>
