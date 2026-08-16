@@ -18,12 +18,16 @@ function formatSoccerClock(match: SoccerMatchState): string {
 
 interface SoccerVentureCardProps {
   tierId: string
+  /** The parent tab's shared clock instant — threaded straight through to
+   *  VentureCard, which needs it to decide whether this tier's auto-play has
+   *  paused for inactivity. One clock per tab, not one per card. */
+  nowMs: number
 }
 
 /** Thin store-wiring adapter around the fully generic VentureCard — the
  *  only place that knows "this card is a soccer one specifically." See
  *  BaseballVentureCard for the parallel adapter. */
-function SoccerVentureCard({ tierId }: SoccerVentureCardProps) {
+function SoccerVentureCard({ tierId, nowMs }: SoccerVentureCardProps) {
   const tierIndex = SOCCER_VENTURE_TIERS.findIndex((c) => c.id === tierId)
   const config = SOCCER_VENTURE_TIERS[tierIndex]
   const tier = useGameStore((s) => s.tiers[tierIndex])
@@ -43,7 +47,12 @@ function SoccerVentureCard({ tierId }: SoccerVentureCardProps) {
       revenue={revenue}
       legacyUnlockMultiplier={unlockCostMultiplier(legacy.permanentUpgrades)}
       legacyRevenueMultiplier={globalRevenueMultiplier(legacy.permanentUpgrades)}
-      onTick={() => tickTier(tierId)}
+      // 'manual' is what exempts a player click from the
+      // unattended-auto-play pause AND re-stamps this tier's inactivity
+      // clock — see GameState.tickTier. useMatchTicker passes nothing here,
+      // so its interval ticks default to 'auto'.
+      onTick={() => tickTier(tierId, 'manual')}
+      nowMs={nowMs}
       onUpgrade={() => upgradeTier(tierId)}
       onHireManager={() => hireManagerForTier(tierId)}
       onUnlock={() => unlockTier(tierId)}

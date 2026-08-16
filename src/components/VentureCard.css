@@ -304,3 +304,17 @@
   background: var(--color-warning);
   transition: width 0.3s ease;
 }
+
+/* Unattended-auto-play pause (see isAutoPlayPaused, engine/ventureTiers.ts).
+   Amber — the same "attention needed, nothing is broken" signal this design
+   system already uses for a locked-but-affordable tier — rather than a red
+   error tone, because nothing has gone wrong and no progress was lost. */
+.venture-card__badge--paused {
+  background: var(--color-warning);
+  color: #fff;
+}
+
+.venture-card__auto-note--paused {
+  color: var(--color-warning);
+  font-weight: 600;
+}

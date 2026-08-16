@@ -8,6 +8,8 @@ import {
   trainingEffectMultiplier,
   nextMilestoneLevel,
   previousMilestoneLevel,
+  isAutoPlayPaused,
+  UNATTENDED_AUTO_PLAY_PAUSE_MS,
 } from '../engine/ventureTiers'
 import { calculateMatchRevenue, expectedMatchRevenue } from '../engine/economy'
 import './VentureCard.css'
@@ -42,6 +44,17 @@ interface VentureCardProps<TState extends MatchStateEssentials> {
   legacyUnlockMultiplier: number
   legacyRevenueMultiplier: number
   onTick: () => void
+  /**
+   * Current wall-clock instant, supplied by the parent tab's shared
+   * `useNowMs` clock rather than read here.
+   *
+   * Passed in for two reasons: it keeps this card's own rendering a pure
+   * function of its props (this project's explicit-nowMs precedent), and it
+   * means ONE clock ticks for a whole tab's worth of cards instead of each
+   * card owning an interval. Used only to decide whether this tier's
+   * auto-play has paused for inactivity — nothing else here depends on time.
+   */
+  nowMs: number
   onUpgrade: () => void
   onHireManager: () => void
   onUnlock: () => void
@@ -105,6 +118,7 @@ function VentureCard<TState extends MatchStateEssentials>({
   legacyUnlockMultiplier,
   legacyRevenueMultiplier,
   onTick,
+  nowMs,
   onUpgrade,
   onHireManager,
   onUnlock,
@@ -214,6 +228,18 @@ function VentureCard<TState extends MatchStateEssentials>({
         )
       : projectedPayout
 
+  // The SAME function the store's tick guard uses — so the two can never
+  // disagree about the RULE. They can briefly disagree about the MOMENT: the
+  // store reads the clock on every tick, while this reads the tab's polled
+  // `nowMs`, so a tier that just crossed the threshold can still render as
+  // "AUTO" for up to AUTO_PLAY_PAUSE_CHECK_MS before repainting. That window
+  // is display-only (the tier really has stopped advancing the instant it
+  // crossed) and is bounded at 15s against a 4-hour threshold. An earlier
+  // version of this comment claimed the two "can never disagree", which an
+  // adversarial review correctly called out as something a polled clock
+  // cannot promise.
+  const autoPlayPaused = isAutoPlayPaused(tier, nowMs)
+
   return (
     <div className="venture-card venture-card--unlocked" data-tier-id={tierId}>
       <div className="venture-card__header">
@@ -223,7 +249,11 @@ function VentureCard<TState extends MatchStateEssentials>({
           </span>
           <h3 className="venture-card__title">{config.name}</h3>
         </div>
-        {tier.managerHired && <span className="venture-card__badge">AUTO</span>}
+        {tier.managerHired && (
+          <span className={`venture-card__badge${autoPlayPaused ? ' venture-card__badge--paused' : ''}`}>
+            {autoPlayPaused ? 'PAUSED' : 'AUTO'}
+          </span>
+        )}
       </div>
 
       <div className="venture-card__score">
@@ -314,7 +344,15 @@ function VentureCard<TState extends MatchStateEssentials>({
         )}
 
         {tier.managerHired ? (
-          <p className="venture-card__auto-note">Manager hired — auto-advancing.</p>
+          autoPlayPaused ? (
+            <p className="venture-card__auto-note venture-card__auto-note--paused">
+              ⏸ Auto-play paused — this tier ran {UNATTENDED_AUTO_PLAY_PAUSE_MS / 3_600_000} hours without you.
+              Your manager and match progress are safe. Tap {actionLabel} to resume — that always works and
+              costs nothing; buying anything on this tier resumes it too.
+            </p>
+          ) : (
+            <p className="venture-card__auto-note">Manager hired — auto-advancing.</p>
+          )
         ) : (
           <button
             type="button"

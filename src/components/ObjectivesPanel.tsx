@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
 import { useGameStore, selectObjectiveStats } from '../store/useGameStore'
+import { useNowMs } from '../hooks/useMatchTicker'
 import {
   objectiveProgress,
   periodicObjectiveConfigById,
@@ -62,11 +62,12 @@ function ObjectivesPanel() {
   // usePeriodicObjectives (hooks/useMatchTicker.ts) — so nothing here can
   // grant, redraw, or persist anything. 30s matches that hook's own cadence
   // and is far finer than the coarse h/m granularity displayed.
-  const [nowMs, setNowMs] = useState(() => Date.now())
-  useEffect(() => {
-    const id = setInterval(() => setNowMs(Date.now()), 30_000)
-    return () => clearInterval(id)
-  }, [])
+  //
+  // Uses the SHARED useNowMs hook (the same one the auto-play pause runs on)
+  // rather than a local interval of its own — this component previously
+  // hand-rolled exactly this, and a second consumer arriving is precisely
+  // when two ad-hoc copies start drifting.
+  const nowMs = useNowMs(30_000)
 
   const stats = selectObjectiveStats(tiers, baseballTiers, lifetimeStats, prestigeCount)
 

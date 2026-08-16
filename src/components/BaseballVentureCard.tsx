@@ -36,6 +36,10 @@ function formatBaseballClock(match: BaseballMatchState): string {
 
 interface BaseballVentureCardProps {
   tierId: string
+  /** The parent tab's shared clock instant — threaded straight through to
+   *  VentureCard, which needs it to decide whether this tier's auto-play has
+   *  paused for inactivity. One clock per tab, not one per card. */
+  nowMs: number
 }
 
 /** Thin store-wiring adapter around the fully generic VentureCard — the
@@ -45,7 +49,7 @@ interface BaseballVentureCardProps {
  *  — baseball tiers exist independently of the reveal/prestige system for
  *  this validation slice (see CLAUDE.md's "Baseball" amendment), so there
  *  is no equivalent concept to wire up here. */
-function BaseballVentureCard({ tierId }: BaseballVentureCardProps) {
+function BaseballVentureCard({ tierId, nowMs }: BaseballVentureCardProps) {
   const tierIndex = BASEBALL_VENTURE_TIERS.findIndex((c) => c.id === tierId)
   // The LIVE per-save-anchored config — NOT the raw BASEBALL_VENTURE_TIERS
   // reference — so every cost this card DISPLAYS (unlock/manager/training)
@@ -74,7 +78,12 @@ function BaseballVentureCard({ tierId }: BaseballVentureCardProps) {
       revenue={revenue}
       legacyUnlockMultiplier={unlockCostMultiplier(legacy.permanentUpgrades)}
       legacyRevenueMultiplier={globalRevenueMultiplier(legacy.permanentUpgrades)}
-      onTick={() => tickBaseballTier(tierId)}
+      // 'manual' is what exempts a player click from the
+      // unattended-auto-play pause AND re-stamps this tier's inactivity
+      // clock — see GameState.tickTier. useMatchTicker passes nothing here,
+      // so its interval ticks default to 'auto'.
+      onTick={() => tickBaseballTier(tierId, 'manual')}
+      nowMs={nowMs}
       onUpgrade={() => upgradeBaseballTier(tierId)}
       onHireManager={() => hireManagerForBaseballTier(tierId)}
       onUnlock={() => unlockBaseballTier(tierId)}

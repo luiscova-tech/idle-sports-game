@@ -62,6 +62,104 @@ export interface VentureTierState<TState> {
    *  stat only; Revenue itself stays one global pool. */
   cumulativeRevenue: number
   lastOutcome: MatchOutcome | null
+  /**
+   * Epoch ms of the last MANUAL interaction with this tier specifically — a
+   * click on its action button, or a purchase made on it (unlock / hire a
+   * manager / improve training). Drives the unattended-auto-play pause
+   * below. Deliberately NOT touched by an automatic tick: the whole point is
+   * to measure how long the tier has been running without the player.
+   *
+   * `0` means "never manually interacted with", which `isAutoPlayPaused`
+   * treats as NOT paused rather than as infinitely stale — see that
+   * function's own doc comment for why that direction is the safe one.
+   */
+  lastInteractionMs: number
+}
+
+/**
+ * How long a manager-hired tier may auto-play WITHOUT any manual interaction
+ * before its auto-ticking pauses.
+ *
+ * 4 hours, and simulation says that is comfortable rather than arbitrary:
+ * the threshold has to clear ONE full match at the SLOWEST tier by a wide
+ * margin, or a player checking in on schedule would routinely find a frozen
+ * half-match. Measured against the real `autoTickIntervalMsForTier` and each
+ * sport's real match length, the slowest match anywhere is soccer's tier 10
+ * at ~26.0 minutes, so 4h is ~9.2 of those (and ~267 matches at soccer tier
+ * 0, ~923 at baseball tier 0). For contrast a 1h threshold would be only
+ * ~2.3 of that slowest match — tight enough that a single interrupted
+ * check-in could strand a match mid-flight. 8h clears it too but weakens
+ * what the mechanic is for. 4h keeps the intended meaning ("this has been
+ * running unattended for a long time") while never being able to interrupt
+ * a match a player is plausibly watching.
+ */
+export const UNATTENDED_AUTO_PLAY_PAUSE_MS = 4 * 60 * 60 * 1000
+
+/**
+ * Whether this tier's AUTO-ticking is currently paused for inactivity.
+ *
+ * Time is an explicit `nowMs` PARAMETER, never read from the system clock
+ * inside — this project's established precedent for testable time-based code
+ * (see the Daily/Weekly objectives amendment in CLAUDE.md). It is what lets
+ * the exact 4-hour boundary be asserted directly rather than waited out.
+ *
+ * Returns the complete answer to "is auto-play blocked right now", so the
+ * store's tick guard and the card's paused message are literally the same
+ * check: a tier that is locked, or has no manager, has no auto-play to pause
+ * and so is never reported as paused.
+ *
+ * FAIL-OPEN on a missing/invalid stamp (`0`, negative, or non-finite):
+ * reported as NOT paused. That direction is deliberate. A brand-new tier is
+ * created with `0` and legitimately has no interaction history yet — but it
+ * also has no manager, and the only way to hire one is a manual purchase,
+ * which stamps a real timestamp, so a genuinely auto-playing tier always has
+ * one. The remaining ways to see `0`/garbage here are a hand-edited or
+ * partially-corrupted save, where failing CLOSED would silently freeze a
+ * player's whole economy with no obvious cause; failing open merely restores
+ * the pre-existing always-on behaviour until their next interaction stamps
+ * it properly. Never pause because of bad data.
+ *
+ * DELIBERATELY NOT consulted by `tierIncomeRatePerSecond` below, which keeps
+ * counting a paused tier's income. Adversarial review raised this three
+ * times independently and reproduced the magnitude (a save with every tier
+ * paused still reports its full structural rate), so the reasoning is
+ * recorded here rather than left implicit. It is KEPT, for three reasons:
+ *
+ *  1. THE OPPOSITE DIRECTION IS AN ACTUAL EXPLOIT. That rate sizes
+ *     income-scaled objective TARGETS (`resolveObjectiveTarget`). If paused
+ *     tiers were excluded, a player whose tiers all pause overnight — which
+ *     happens on its own, for free — would have the rate collapse to
+ *     OBJECTIVE_FLOOR_INCOME_RATE, so the daily rolling over at local
+ *     midnight would draw a trivially cheap "Earn N Revenue" target that
+ *     they then complete instantly on resuming. Letting the game go idle
+ *     must never be the optimal way to play it.
+ *  2. FOR REWARDS IT IS GENEROUS, NEVER EXPLOITABLE. Pricing a reward off
+ *     structural income can only over-pay relative to what a paused player
+ *     is actually earning, and buying that over-payment costs them all their
+ *     real income in the meantime — nobody comes out ahead.
+ *  3. THE DOWNSIDE IS SELF-CORRECTING BY DESIGN. The honest cost is that a
+ *     target drawn while tiers are paused is sized against income the player
+ *     is not currently earning, so it reads as too hard until they resume —
+ *     and resuming is one click per tier, which is exactly the behaviour
+ *     this whole mechanic exists to elicit.
+ *
+ * The tripwire for a future session: if a reward or target is ever derived
+ * from this rate in a context where OVER-stating it would benefit the player
+ * for doing nothing, that consumer needs its own paused-aware rate — not a
+ * change here, which would reopen (1).
+ */
+export function isAutoPlayPaused(
+  tier: { unlocked: boolean; managerHired: boolean; lastInteractionMs: number },
+  nowMs: number,
+  thresholdMs: number = UNATTENDED_AUTO_PLAY_PAUSE_MS,
+): boolean {
+  if (!tier?.unlocked || !tier.managerHired) return false
+  const stamp = tier.lastInteractionMs
+  if (!Number.isFinite(stamp) || stamp <= 0) return false
+  if (!Number.isFinite(nowMs)) return false
+  // `>=` so the boundary itself pauses — the threshold is "this many hours
+  // of inactivity is too long", and the harness pins the exact instant.
+  return nowMs - stamp >= thresholdMs
 }
 
 /** Revenue cost to raise a tier currently at `currentLevel` to the next level. */

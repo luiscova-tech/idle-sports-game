@@ -1,4 +1,6 @@
 import { useGameStore, visibleTierUnlockProgress } from '../store/useGameStore'
+import { isAutoPlayPaused } from '../engine/ventureTiers'
+import { useNowMs, AUTO_PLAY_PAUSE_CHECK_MS } from '../hooks/useMatchTicker'
 import { nearestAchievementProgress } from '../engine/achievements'
 import { revealedTierCount, allVisibleTiersUnlocked } from '../sports/soccer/soccerModule'
 import { BASEBALL_VENTURE_TIERS } from '../sports/baseball/baseballModule'
@@ -62,6 +64,22 @@ function Hub({ onEnter }: HubProps) {
   const soccerTierProgress = visibleTierUnlockProgress(tiers, revealedTierCount(prestigeCount))
   const baseballTierProgress = visibleTierUnlockProgress(baseballTiers, BASEBALL_VENTURE_TIERS.length)
 
+  // How many managed tiers have hard-paused for inactivity, per sport.
+  //
+  // Added because the hub is the screen a returning player ALWAYS lands on,
+  // and without this the one moment the pause mechanic most needs to
+  // communicate — "you have been away, your economy is stopped" — was
+  // invisible until they happened to open a sport screen. Four independent
+  // review lenses converged on that gap. Uses the SAME isAutoPlayPaused the
+  // store's guard and each card use, per this screen's shared-derivation
+  // rule; `useNowMs` is the same polled display clock the tabs use, so this
+  // readout carries the same bounded display lag and no other difference.
+  const nowMs = useNowMs(AUTO_PLAY_PAUSE_CHECK_MS)
+  const countPaused = (list: { unlocked: boolean; managerHired: boolean; lastInteractionMs: number }[]) =>
+    list.reduce((n, t) => n + (isAutoPlayPaused(t, nowMs) ? 1 : 0), 0)
+  const soccerPaused = countPaused(tiers)
+  const baseballPaused = countPaused(baseballTiers)
+
   const soccerAchievement = nearestAchievementProgress(stats, earnedIds, 'soccerWins')
   const baseballAchievement = nearestAchievementProgress(stats, earnedIds, 'baseballWins')
 
@@ -83,6 +101,9 @@ function Hub({ onEnter }: HubProps) {
       name: 'Soccer',
       tagline: 'Your football club',
       stats: [
+        ...(soccerPaused > 0
+          ? [{ label: '⏸ Auto-play paused', value: `${soccerPaused} tier${soccerPaused === 1 ? '' : 's'}`, warn: true }]
+          : []),
         {
           label: 'Tiers unlocked',
           value: `${soccerTierProgress.unlocked}/${soccerTierProgress.visible}`,
@@ -105,6 +126,9 @@ function Hub({ onEnter }: HubProps) {
       name: 'Baseball',
       tagline: 'Your ball club',
       stats: [
+        ...(baseballPaused > 0
+          ? [{ label: '⏸ Auto-play paused', value: `${baseballPaused} tier${baseballPaused === 1 ? '' : 's'}`, warn: true }]
+          : []),
         {
           label: 'Tiers unlocked',
           value: `${baseballTierProgress.unlocked}/${baseballTierProgress.visible}`,
@@ -170,7 +194,7 @@ function Hub({ onEnter }: HubProps) {
 
               <span className="hub-building__stats">
                 {building.stats.map((stat) => (
-                  <span className="hub-stat" key={stat.label}>
+                  <span className={`hub-stat${'warn' in stat && stat.warn ? ' hub-stat--warn' : ''}`} key={stat.label}>
                     <span className="hub-stat__row">
                       <span className="hub-stat__label">{stat.label}</span>
                       <span className="hub-stat__value">{stat.value}</span>

@@ -1,8 +1,48 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useGameStore } from '../store/useGameStore'
-import { autoTickIntervalMsForTier } from '../engine/ventureTiers'
+import { autoTickIntervalMsForTier, isAutoPlayPaused } from '../engine/ventureTiers'
 import { SOCCER_VENTURE_TIERS } from '../sports/soccer/soccerModule'
 import { BASEBALL_VENTURE_TIERS } from '../sports/baseball/baseballModule'
+
+/**
+ * How often a SCREEN re-evaluates the unattended-auto-play pause boundary for
+ * DISPLAY.
+ *
+ * This is a polling cadence, so it is also an honest upper bound on display
+ * lag: a tier that crosses the threshold is paused in the store immediately
+ * (that guard reads the clock itself, on every tick), but its card can keep
+ * showing "AUTO" for up to this long before repainting as "PAUSED". 15
+ * seconds against a four-HOUR threshold makes that window imperceptible while
+ * costing only a few re-renders a minute, confined to the tab that owns the
+ * clock. Nothing about CORRECTNESS rests on it — an adversarial review
+ * correctly caught an earlier comment here claiming the card and the store
+ * "can never disagree", which a polled clock cannot guarantee.
+ */
+export const AUTO_PLAY_PAUSE_CHECK_MS = 15_000
+
+/**
+ * A shared, coarse "what time is it" clock for anything that has to notice a
+ * time boundary passing while the rest of the app sits still.
+ *
+ * Exists because this project's time-based logic takes `nowMs` as an explicit
+ * PARAMETER (the pattern established by the Daily/Weekly objectives work) —
+ * which makes those functions testable, but also means SOMETHING has to
+ * supply a moving value or a boundary would only ever be noticed on an
+ * unrelated re-render. This is that something, in one place, so the two
+ * consumers (the auto-play pause and the Objectives countdowns) can't drift
+ * into two different ad-hoc intervals.
+ *
+ * Display/derivation only: it writes no store state, so it can never grant,
+ * persist or advance anything by itself.
+ */
+export function useNowMs(intervalMs: number): number {
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), intervalMs)
+    return () => clearInterval(id)
+  }, [intervalMs])
+  return nowMs
+}
 
 /**
  * Owns the idle loop's timers — the only setIntervals in the codebase. Each
@@ -38,15 +78,35 @@ export function useMatchTicker() {
   // Stable, order-preserving keys so the effect only re-diffs when the SET
   // of auto-playing tiers changes — not on every match tick (which would
   // otherwise re-diff on every score change).
+  // Paused tiers are dropped from the interval set so their timers are torn
+  // down rather than left firing no-ops.
+  //
+  // `Date.now()` is read INSIDE the selector rather than from a `useNowMs`
+  // state clock, deliberately. This hook is mounted in App.tsx, above every
+  // screen, so a state clock here would re-render the ENTIRE app tree on a
+  // fixed interval forever — a real cost this hook previously never imposed,
+  // and one that buys nothing, because CORRECTNESS does not live here: the
+  // store's own guard inside tickTier/tickBaseballTier is authoritative and
+  // consults the clock itself on every tick. This filter is opportunistic
+  // cleanup only. (Caught by adversarial review, which flagged both the
+  // app-wide re-render and that a third clock instance was being spun up
+  // here while claiming to "share" one.)
+  //
+  // The consequence, stated plainly: these selectors re-run on every store
+  // change, so a tier that crosses the pause boundary loses its interval on
+  // the next store change — continuous while ANY tier is still running, and
+  // never, once every tier has paused. That last case is exactly the one
+  // where it does not matter: the surviving intervals fire into the store's
+  // guard and do nothing at all.
   const soccerAutoTierKey = useGameStore((s) =>
     s.tiers
-      .filter((t) => t.unlocked && t.managerHired)
+      .filter((t) => t.unlocked && t.managerHired && !isAutoPlayPaused(t, Date.now()))
       .map((t) => t.id)
       .join(','),
   )
   const baseballAutoTierKey = useGameStore((s) =>
     s.baseballTiers
-      .filter((t) => t.unlocked && t.managerHired)
+      .filter((t) => t.unlocked && t.managerHired && !isAutoPlayPaused(t, Date.now()))
       .map((t) => t.id)
       .join(','),
   )

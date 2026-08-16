@@ -201,3 +201,12 @@
   color: var(--color-primary);
   border-color: var(--color-primary);
 }
+
+/* Unattended-auto-play pause signal (see isAutoPlayPaused). Amber, matching
+   the venture card's own paused badge — the shared "needs attention, nothing
+   is broken" tone, never an error red. */
+.hub-stat--warn .hub-stat__label,
+.hub-stat--warn .hub-stat__value {
+  color: var(--color-warning);
+  font-weight: 700;
+}

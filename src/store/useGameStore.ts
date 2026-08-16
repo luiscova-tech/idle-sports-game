@@ -39,6 +39,7 @@ import {
   resolveVentureTierTick,
   tierIncomeRatePerSecond,
   incomeRateAnchorMultiplier,
+  isAutoPlayPaused,
 } from '../engine/ventureTiers'
 import { matchOutcomeProbabilities, matchOutcomeProbabilitiesWithoutDrawTriple } from '../engine/winProbability'
 import {
@@ -90,6 +91,12 @@ function createInitialTiers(permanentUpgrades: PermanentUpgradeLevels): VentureT
     matchesCompleted: 0,
     cumulativeRevenue: 0,
     lastOutcome: null,
+    // `0` = never manually interacted with. Safe as a starting value
+    // precisely because a fresh tier has no manager either, and the only way
+    // to hire one is a manual purchase, which stamps a real timestamp — so a
+    // tier that can actually auto-play always has a real one. See
+    // isAutoPlayPaused's fail-open note (engine/ventureTiers.ts).
+    lastInteractionMs: 0,
   }))
 }
 
@@ -110,6 +117,8 @@ function createInitialBaseballTiers(): BaseballVentureTier[] {
     matchesCompleted: 0,
     cumulativeRevenue: 0,
     lastOutcome: null,
+    // Same as soccer's — see createInitialTiers above.
+    lastInteractionMs: 0,
   }))
 }
 
@@ -914,6 +923,11 @@ export interface MilestoneNotification {
   message: string
 }
 
+/** Who asked for a tick — see GameState.tickTier. Exported so the card
+ *  adapters can annotate their manual calls without a bare boolean literal
+ *  at the call site. */
+export type TickSource = 'manual' | 'auto'
+
 interface GameState {
   isInitialized: boolean
   /** In-band mirror of the persist middleware's own `version` option below
@@ -1002,11 +1016,21 @@ interface GameState {
    *  WEEKLY_LEGACY_POINT_REWARD points per 7-day window". */
   weeklyObjective: PeriodicObjectiveState
   notifications: MilestoneNotification[]
-  tickTier: (tierId: string) => void
+  /**
+   * Advances one tier by a tick. `source` distinguishes the two callers of
+   * this ONE shared resolution path (it has never been forked, and still
+   * isn't — see CLAUDE.md's manual-before-automated pattern): 'manual' is a
+   * player click, 'auto' is useMatchTicker's interval. The distinction
+   * exists solely for the unattended-auto-play pause — a manual tick is
+   * never gated by it and re-stamps the tier's inactivity clock, an
+   * automatic one is gated and never stamps. Defaults to 'auto' so the
+   * gated, non-stamping behaviour is what an un-annotated caller gets.
+   */
+  tickTier: (tierId: string, source?: TickSource) => void
   upgradeTier: (tierId: string) => void
   hireManagerForTier: (tierId: string) => void
   unlockTier: (tierId: string) => void
-  tickBaseballTier: (tierId: string) => void
+  tickBaseballTier: (tierId: string, source?: TickSource) => void
   upgradeBaseballTier: (tierId: string) => void
   hireManagerForBaseballTier: (tierId: string) => void
   unlockBaseballTier: (tierId: string) => void
@@ -1059,7 +1083,7 @@ interface GameState {
  * resolved outcome, so tolerant reads are the right fix there, not a
  * migration step here.
  */
-const CURRENT_SCHEMA_VERSION = 8
+const CURRENT_SCHEMA_VERSION = 9
 
 /**
  * SCHEMA_MIGRATIONS[v] transforms a persisted state KNOWN to be shaped like
@@ -1407,6 +1431,34 @@ const SCHEMA_MIGRATIONS: Record<number, (state: any) => any> = {
       weeklyObjective: createPeriodicObjectiveState('weekly', stats, incomeRate, now),
     }
   },
+  // Version 8 -> 9: every venture tier of BOTH sports gained
+  // `lastInteractionMs`, the per-tier stamp behind the unattended-auto-play
+  // pause (see `isAutoPlayPaused`, engine/ventureTiers.ts). A new field
+  // nested inside something already persisted is exactly the case this
+  // project's schema-versioning convention exists for.
+  //
+  // THE ONE DECISION THAT MATTERS HERE: every tier is stamped with the
+  // MIGRATION MOMENT, giving each a full fresh 4-hour window starting now.
+  // The alternative — leaving them unstamped, or back-dating them to some
+  // notion of "when they were last played" — would mean an existing player
+  // whose managers have been running happily opens the app after this update
+  // and finds tiers ALREADY paused, with a message about inactivity they
+  // never had a chance to avoid. That reads as the update having broken
+  // their game, which is the opposite of what the mechanic is for. There is
+  // also no honest data to back-date FROM: nothing in any prior save records
+  // when a tier was last touched.
+  //
+  // Note this is deliberately NOT the fail-open `0`: a real timestamp is
+  // what makes the pause start applying normally from this moment on, rather
+  // than never applying to migrated tiers at all.
+  8: (state: any) => {
+    const now = Date.now()
+    const stamp = (tiers: unknown) =>
+      Array.isArray(tiers)
+        ? tiers.map((t: any) => (t && typeof t === 'object' ? { ...t, lastInteractionMs: now } : t))
+        : tiers
+    return { ...state, tiers: stamp(state?.tiers), baseballTiers: stamp(state?.baseballTiers) }
+  },
 }
 
 function migrateGameState(persistedState: unknown, version: number): unknown {
@@ -1495,17 +1547,37 @@ export const useGameStore = create<GameState>()(
       // CLAUDE.md for why this specific amount of plumbing duplication
       // (not the underlying economic MATH, which is fully shared) was a
       // deliberate, documented tradeoff for this validation slice.
-      tickTier: (tierId) => {
+      tickTier: (tierId, source = 'auto') => {
         const { tiers, legacy } = get()
         const tierIndex = tiers.findIndex((t) => t.id === tierId)
         if (tierIndex === -1) return
         const tier = tiers[tierIndex]
         if (!tier.unlocked) return
+        // THE UNATTENDED-AUTO-PLAY GUARD, and the authoritative one: an
+        // automatic tick on a tier that has gone `UNATTENDED_AUTO_PLAY_PAUSE_MS`
+        // without a manual interaction does nothing at all, so the match
+        // simply stops advancing and freezes byte-for-byte where it was
+        // (nothing below runs, so `match`/`tickIndex` are never written).
+        // useMatchTicker also drops such a tier from its interval set, but
+        // that is an efficiency measure on a coarse clock — THIS check is
+        // what makes the pause correct, exactly as isTierRevealed is the
+        // authoritative reveal check rather than the render slice.
+        // A MANUAL tick is deliberately never gated: manual engagement is
+        // untouched by this mechanic, and is what resumes auto-play.
+        if (source === 'auto' && isAutoPlayPaused(tier, Date.now())) return
         // Defense in depth: a not-yet-revealed tier must never earn real
         // Revenue, even if `unlocked`/`managerHired` were somehow set
         // directly (e.g. a hand-edited localStorage save) — this is the
         // actual choke point, not just Home.tsx's render slice.
         if (!isTierRevealed(tierIndex, legacy.prestigeCount)) return
+
+        // A MANUAL tick is itself an interaction with this tier, so it
+        // re-stamps the clock and thereby resumes auto-play immediately —
+        // the resume rule, implemented in the one place a manual tick
+        // already goes through. Computed once here (not per branch) so both
+        // completion and non-completion write the identical instant, and
+        // `undefined` for an auto tick so spreading it is a genuine no-op.
+        const manualStamp = source === 'manual' ? { lastInteractionMs: Date.now() } : undefined
 
         const config = SOCCER_VENTURE_TIERS[tierIndex]
         const legacyMultiplier = globalRevenueMultiplier(legacy.permanentUpgrades)
@@ -1524,6 +1596,7 @@ export const useGameStore = create<GameState>()(
                     matchesCompleted: t.matchesCompleted + 1,
                     cumulativeRevenue: t.cumulativeRevenue + totalEarned,
                     lastOutcome: result.outcome ?? t.lastOutcome,
+                    ...manualStamp,
                   }
                 : t,
             )
@@ -1608,6 +1681,7 @@ export const useGameStore = create<GameState>()(
                     match: result.nextMatch,
                     tickIndex: result.nextTickIndex,
                     cumulativeRevenue: t.cumulativeRevenue + result.perTickRevenue,
+                    ...manualStamp,
                   }
                 : t,
             )
@@ -1698,7 +1772,13 @@ export const useGameStore = create<GameState>()(
         )
 
         set((s) => {
-          const nextTiers = s.tiers.map((t, i) => (i === tierIndex ? { ...t, level: nextLevel } : t))
+          // A purchase ON THIS TIER counts as a manual interaction, so it
+          // re-stamps the inactivity clock and resumes auto-play if this
+          // tier had paused — per the rule that ANY manual interaction with
+          // a tier resumes it, not just a click on its action button.
+          const nextTiers = s.tiers.map((t, i) =>
+            i === tierIndex ? { ...t, level: nextLevel, lastInteractionMs: Date.now() } : t,
+          )
           // A purchase moves `totalTierLevels`, which objectives track — so
           // objectives MUST be resolved here, not only on the tick path. See
           // resolveObjectivesForState's own doc comment.
@@ -1759,9 +1839,20 @@ export const useGameStore = create<GameState>()(
         const cost = SOCCER_VENTURE_TIERS[tierIndex].managerHireCost
         if (currencies.revenue < cost) return
 
+        // A purchase ON THIS TIER counts as a manual interaction, so it
+        // re-stamps the inactivity clock and resumes auto-play if this
+        // tier had paused — per the rule that ANY manual interaction with
+        // a tier resumes it, not just a click on its action button.
+        // Hiring is also what gives a tier its FIRST real stamp: a fresh
+        // tier starts at 0 (never interacted), and this is the only way
+        // managerHired can become true — so a tier that can auto-play at all
+        // is always stamped, which is what makes isAutoPlayPaused's
+        // fail-open treatment of 0 safe rather than a loophole.
         set((s) => ({
           currencies: { revenue: s.currencies.revenue - cost },
-          tiers: s.tiers.map((t, i) => (i === tierIndex ? { ...t, managerHired: true } : t)),
+          tiers: s.tiers.map((t, i) =>
+            i === tierIndex ? { ...t, managerHired: true, lastInteractionMs: Date.now() } : t,
+          ),
         }))
       },
 
@@ -1787,7 +1878,13 @@ export const useGameStore = create<GameState>()(
         if (currencies.revenue < cost) return
 
         set((s) => {
-          const nextTiers = s.tiers.map((t, i) => (i === tierIndex ? { ...t, unlocked: true } : t))
+          // A purchase ON THIS TIER counts as a manual interaction, so it
+          // re-stamps the inactivity clock and resumes auto-play if this
+          // tier had paused — per the rule that ANY manual interaction with
+          // a tier resumes it, not just a click on its action button.
+          const nextTiers = s.tiers.map((t, i) =>
+            i === tierIndex ? { ...t, unlocked: true, lastInteractionMs: Date.now() } : t,
+          )
           // A purchase moves a stat objectives track (tier levels / unlocked
           // count), so objectives resolve here too — not only on ticks.
           const resolved = resolveObjectivesForState(
@@ -1835,12 +1932,24 @@ export const useGameStore = create<GameState>()(
       // achievement line as soccer (that line's own documented philosophy
       // is "total wins across every venture tier combined," not "every
       // soccer venture tier").
-      tickBaseballTier: (tierId) => {
+      tickBaseballTier: (tierId, source = 'auto') => {
         const { baseballTiers, legacy, baseballCostAnchorMultiplier } = get()
         const tierIndex = baseballTiers.findIndex((t) => t.id === tierId)
         if (tierIndex === -1) return
         const tier = baseballTiers[tierIndex]
         if (!tier.unlocked) return
+        // Identical unattended-auto-play guard to soccer's tickTier above —
+        // the mechanic is sport-agnostic by construction (isAutoPlayPaused
+        // consumes only the shared VentureTierState shape), so there is no
+        // per-sport special-casing anywhere in it.
+        if (source === 'auto' && isAutoPlayPaused(tier, Date.now())) return
+
+        // A MANUAL tick is itself an interaction with this tier, so it
+        // re-stamps the clock and thereby resumes auto-play immediately —
+        // the resume rule, implemented in the one place a manual tick
+        // already goes through. Computed once here (not per branch) so both
+        // completion and non-completion write the identical instant.
+        const manualStamp = source === 'manual' ? { lastInteractionMs: Date.now() } : undefined
 
         // The LIVE (per-save-anchored) config — not the raw
         // BASEBALL_VENTURE_TIERS reference — for the same "one authoritative
@@ -1873,6 +1982,7 @@ export const useGameStore = create<GameState>()(
                     matchesCompleted: t.matchesCompleted + 1,
                     cumulativeRevenue: t.cumulativeRevenue + totalEarned,
                     lastOutcome: result.outcome ?? t.lastOutcome,
+                    ...manualStamp,
                   }
                 : t,
             )
@@ -1936,7 +2046,13 @@ export const useGameStore = create<GameState>()(
           set((s) => {
             const updatedTiers = s.baseballTiers.map((t, i) =>
               i === tierIndex
-                ? { ...t, match: result.nextMatch, tickIndex: result.nextTickIndex, cumulativeRevenue: t.cumulativeRevenue + result.perTickRevenue }
+                ? {
+                    ...t,
+                    match: result.nextMatch,
+                    tickIndex: result.nextTickIndex,
+                    cumulativeRevenue: t.cumulativeRevenue + result.perTickRevenue,
+                    ...manualStamp,
+                  }
                 : t,
             )
             const granted = applyEarnedAchievements(
@@ -2013,8 +2129,12 @@ export const useGameStore = create<GameState>()(
         )
 
         set((s) => {
+          // A purchase ON THIS TIER counts as a manual interaction, so it
+          // re-stamps the inactivity clock and resumes auto-play if this
+          // tier had paused — per the rule that ANY manual interaction with
+          // a tier resumes it, not just a click on its action button.
           const nextBaseballTiers = s.baseballTiers.map((t, i) =>
-            i === tierIndex ? { ...t, level: nextLevel } : t,
+            i === tierIndex ? { ...t, level: nextLevel, lastInteractionMs: Date.now() } : t,
           )
           // A purchase moves a stat objectives track (tier levels / unlocked
           // count), so objectives resolve here too — not only on ticks.
@@ -2070,9 +2190,12 @@ export const useGameStore = create<GameState>()(
         const cost = scaledBaseballTiers(baseballCostAnchorMultiplier)[tierIndex].managerHireCost
         if (currencies.revenue < cost) return
 
+        // Same interaction stamp as soccer's hireManagerForTier — see there.
         set((s) => ({
           currencies: { revenue: s.currencies.revenue - cost },
-          baseballTiers: s.baseballTiers.map((t, i) => (i === tierIndex ? { ...t, managerHired: true } : t)),
+          baseballTiers: s.baseballTiers.map((t, i) =>
+            i === tierIndex ? { ...t, managerHired: true, lastInteractionMs: Date.now() } : t,
+          ),
         }))
       },
 
@@ -2097,8 +2220,12 @@ export const useGameStore = create<GameState>()(
         if (currencies.revenue < cost) return
 
         set((s) => {
+          // A purchase ON THIS TIER counts as a manual interaction, so it
+          // re-stamps the inactivity clock and resumes auto-play if this
+          // tier had paused — per the rule that ANY manual interaction with
+          // a tier resumes it, not just a click on its action button.
           const nextBaseballTiers = s.baseballTiers.map((t, i) =>
-            i === tierIndex ? { ...t, unlocked: true } : t,
+            i === tierIndex ? { ...t, unlocked: true, lastInteractionMs: Date.now() } : t,
           )
           // A purchase moves a stat objectives track (tier levels / unlocked
           // count), so objectives resolve here too — not only on ticks.
