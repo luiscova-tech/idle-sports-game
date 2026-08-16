@@ -5,6 +5,7 @@ import { BASEBALL_VENTURE_TIERS } from '../sports/baseball/baseballModule'
 import soccerBuildingImage from '../assets/buildings/soccer-building.jpg'
 import baseballBuildingImage from '../assets/buildings/baseball-building.jpg'
 import franchiseHqBuildingImage from '../assets/buildings/franchise-hq-building.jpg'
+import ObjectivesPanel from './ObjectivesPanel'
 import './Hub.css'
 
 /** Which building the player tapped — mirrors Home.tsx's ViewId minus
@@ -147,6 +148,10 @@ function Hub({ onEnter }: HubProps) {
   return (
     <section className="hub" aria-label="Franchise hub">
       <p className="hub__intro">Choose where to work today.</p>
+      {/* Objectives sit on the Hub itself, above the buildings — see
+          ObjectivesPanel's own doc comment for why this screen and not a
+          fourth building or a Franchise HQ sub-section. */}
+      <ObjectivesPanel />
       <div className="hub__buildings">
         {buildings.map((building) => (
           <button

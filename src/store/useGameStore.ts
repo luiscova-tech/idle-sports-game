@@ -12,6 +12,18 @@ import {
   type PermanentUpgradeLevels,
 } from '../engine/prestige'
 import { checkNewlyEarnedAchievements, assertNeverRewardType, ACHIEVEMENTS } from '../engine/achievements'
+import { scaledRevenueReward } from '../engine/economy'
+import {
+  type ActiveObjective,
+  type ObjectiveStatKey,
+  OBJECTIVE_STAT_SCOPES,
+  objectiveConfigById,
+  objectiveProgress,
+  fillObjectives,
+  sanitizeObjectives,
+  resolveObjectiveTarget,
+  ACTIVE_OBJECTIVE_TARGET,
+} from '../engine/objectives'
 import {
   type VentureTierState,
   tierUpgradeCost,
@@ -28,6 +40,7 @@ import {
   SOCCER_VENTURE_TIERS,
   isTierRevealed,
   allVisibleTiersUnlocked,
+  revealedTierCount,
 } from '../sports/soccer/soccerModule'
 import {
   createBaseballModule,
@@ -388,6 +401,257 @@ export function visibleTierUnlockProgress(
   return { unlocked, visible }
 }
 
+/**
+ * The generic stats record the Objectives system measures against — the
+ * objective analogue of the record `applyEarnedAchievements` builds for
+ * achievements, and built the same way: from state THIS STORE ALREADY
+ * TRACKS, never a new parallel counter.
+ *
+ * Every entry reuses an existing shared derivation rather than recomputing
+ * anything (see CLAUDE.md's "one authoritative source" rule):
+ *   - the three win counters come straight off `lifetimeStats`, the same
+ *     fields the achievement lines read;
+ *   - `franchiseEarnings` is `totalFranchiseEarnings`, the exact function
+ *     the Legacy panel previews and `resetForLegacy()` award Legacy Points
+ *     from;
+ *   - `tiersUnlocked` sums `visibleTierUnlockProgress`, the same helper the
+ *     Hub's "N/M unlocked" readout uses (soccer counted over its revealed
+ *     window via `revealedTierCount`, exactly as SoccerTab slices its
+ *     cards; baseball over its full ladder, as BaseballTab renders it);
+ *   - `totalTierLevels` is a plain sum of the live `level` fields.
+ * A malformed/hand-edited `level` is coerced to 0 rather than poisoning the
+ * sum to NaN, matching this file's standing defensive posture.
+ */
+export function selectObjectiveStats(
+  tiers: { unlocked: boolean; level: number; cumulativeRevenue: number }[],
+  baseballTiers: { unlocked: boolean; level: number; cumulativeRevenue: number }[],
+  lifetimeStats: LifetimeStats,
+  prestigeCount: number,
+): Record<ObjectiveStatKey, number> {
+  const levelSum = (acc: number, t: { level: number }) =>
+    acc + (Number.isFinite(t?.level) ? t.level : 0)
+  const soccerUnlocked = visibleTierUnlockProgress(tiers, revealedTierCount(prestigeCount)).unlocked
+  const baseballUnlocked = visibleTierUnlockProgress(baseballTiers, baseballTiers.length).unlocked
+  return {
+    totalWins: lifetimeStats.totalWins,
+    soccerWins: lifetimeStats.soccerWins,
+    baseballWins: lifetimeStats.baseballWins,
+    franchiseEarnings: totalFranchiseEarnings(tiers, baseballTiers),
+    totalTierLevels: tiers.reduce(levelSum, 0) + baseballTiers.reduce(levelSum, 0),
+    tiersUnlocked: soccerUnlocked + baseballUnlocked,
+    // Exposed separately purely as an eligibility signal — see
+    // ObjectiveConfig.requiresStatPositive: baseball-specific objectives
+    // must not be drawn for a player who owns no baseball tier, since they
+    // could never progress it.
+    baseballTiersUnlocked: baseballUnlocked,
+  }
+}
+
+/**
+ * The first set of objectives for a brand-new save.
+ *
+ * Baselines are captured from the REAL fresh-game state, not from zeros:
+ * a new save already has every tier at level 1 (so `totalTierLevels` is 22,
+ * not 0) and at least one tier unlocked. Baselining at 0 would make a
+ * "improve training 5 times" objective read as instantly complete on the
+ * very first render — so this builds the actual initial tier arrays and runs
+ * them through the same `selectObjectiveStats` derivation every later check uses.
+ * Income rate is genuinely 0 here (nothing is managed yet), which
+ * `resolveObjectiveTarget` floors correctly for any income-scaled target.
+ */
+function createInitialObjectives(permanentUpgrades: PermanentUpgradeLevels): ActiveObjective[] {
+  const stats = selectObjectiveStats(
+    createInitialTiers(permanentUpgrades),
+    createInitialBaseballTiers(),
+    createInitialLifetimeStats(),
+    0,
+  )
+  return fillObjectives([], stats, 0)
+}
+
+/**
+ * Grants any newly-complete objectives and refills the active set, applying
+ * rewards atomically within the caller's own `set()` — the exact shape (and
+ * the exact lazy `getIncomeRatePerSecond` thunk contract) as
+ * `applyEarnedAchievements` below, and called from the same four places, so
+ * the two systems stay in lockstep about WHEN progress is evaluated.
+ *
+ * Rewards go through the SHARED `scaledRevenueReward` (engine/economy.ts) —
+ * the identical function achievements' own `scaledRevenue` rewards use, per
+ * the requirement to reuse the real reward machinery rather than
+ * approximate a second copy of it.
+ *
+ * The thunk is called at most once per invocation even when several
+ * objectives complete at the same instant (memoised into `rate`), so the
+ * rare multi-completion tick doesn't loop over every tier of both sports
+ * more than necessary — and, more importantly, so simultaneous completions
+ * are all priced off ONE consistent snapshot of the economy rather than
+ * subtly different ones.
+ */
+function applyCompletedObjectives(
+  objectives: readonly ActiveObjective[],
+  stats: Record<string, number>,
+  baseRevenue: number,
+  getIncomeRatePerSecond: () => number,
+  random: () => number = Math.random,
+): { objectives: ActiveObjective[]; revenue: number; completedCount: number } {
+  const completed = objectives.filter((a) => objectiveProgress(a, stats)?.complete)
+  const needsTopUp = objectives.length - completed.length < ACTIVE_OBJECTIVE_TARGET
+
+  // The overwhelmingly common case: nothing completed and the set is
+  // already full. Bail before touching the income rate, which loops every
+  // tier of both sports doing real probability math — this runs on EVERY
+  // tick, so it must stay cheap when there is nothing to do.
+  if (completed.length === 0 && !needsTopUp) {
+    return { objectives: [...objectives], revenue: baseRevenue, completedCount: 0 }
+  }
+
+  let rate: number | null = null
+  const rateOnce = () => (rate ??= getIncomeRatePerSecond())
+
+  let revenue = baseRevenue
+  for (const active of completed) {
+    const config = objectiveConfigById(active.configId)
+    if (!config) continue
+    revenue += scaledRevenueReward(
+      config.rewardIncomeRateSeconds,
+      config.rewardMinAmount,
+      rateOnce(),
+    )
+  }
+
+  const completedIds = new Set(completed.map((a) => a.configId))
+  const remaining = objectives.filter((a) => !completedIds.has(a.configId))
+  // Baselines for the replacements are captured from the SAME `stats`
+  // snapshot the completion was judged against, so a replacement can never
+  // be accidentally pre-credited with progress the player already banked.
+  // This also self-heals a set left short by merge()'s sanitizer (a
+  // corrupted/stale persisted entry dropped on load).
+  // The just-completed ids are excluded from the refill so a finished
+  // objective can't reappear in the same frame it was completed in.
+  return {
+    objectives: fillObjectives(remaining, stats, rateOnce(), random, [...completedIds]),
+    revenue,
+    completedCount: completed.length,
+  }
+}
+
+/**
+ * Repairs and tops up a persisted `objectives` array at load time — the
+ * function `merge()` needs and whose absence an adversarial review caught
+ * (two comments referenced an `ensureObjectives` that was never written).
+ *
+ * Does three things `sanitizeObjectives` alone cannot, because they need a
+ * live stats snapshot:
+ *  1. Drops any entry whose `baseline` EXCEEDS the current stat. Such an
+ *     objective can never complete (progress clamps at 0) and never rotates
+ *     (the top-up only fires on a COUNT shortfall), so it would sit frozen
+ *     at 0% forever, presenting as a healthy-looking but dead panel. This is
+ *     reachable when merge() falls back to fresh default tiers while passing
+ *     persisted objectives through verbatim — the baselines then describe an
+ *     economy that no longer exists.
+ *  2. Tops the set back up to the full 2-3, so a save whose entries were
+ *     dropped (corrupt, stale, or referencing a removed pool id) doesn't
+ *     hydrate with an empty Objectives section — ObjectivesPanel renders
+ *     nothing at length 0, so the Hub section would silently vanish.
+ *  3. Falls back to the caller's known-good default on ANY throw, keeping
+ *     the same never-throw-during-hydrate posture the rest of merge() has.
+ */
+function ensureObjectives(
+  candidate: unknown,
+  tiers: VentureTier[],
+  baseballTiers: BaseballVentureTier[],
+  lifetimeStats: LifetimeStats,
+  prestigeCount: number,
+  permanentUpgrades: PermanentUpgradeLevels,
+  baseballCostAnchorMultiplier: number,
+  fallback: ActiveObjective[],
+): ActiveObjective[] {
+  try {
+    const stats = selectObjectiveStats(tiers, baseballTiers, lifetimeStats, prestigeCount)
+    let rate = 0
+    try {
+      rate = currentAggregateIncomeRatePerSecond(
+        tiers,
+        baseballTiers,
+        globalRevenueMultiplier(permanentUpgrades),
+        baseballCostAnchorMultiplier,
+      )
+    } catch {
+      rate = 0
+    }
+    const kept = sanitizeObjectives(candidate).filter((a) => {
+      const config = objectiveConfigById(a.configId)
+      return config ? a.baseline <= (stats[config.statTracked] ?? 0) : false
+    })
+    return fillObjectives(kept, stats, rate)
+  } catch {
+    return fallback
+  }
+}
+
+/**
+ * Rewrites the baseline of every RUN-SCOPED objective to the supplied
+ * (post-reset) stats, leaving lifetime-scoped ones untouched — see
+ * OBJECTIVE_STAT_SCOPES (engine/objectives.ts) for why the distinction
+ * exists and `resetForLegacy` for where it's applied. Pure; returns a new
+ * array. An objective whose config no longer exists is passed through
+ * unchanged and gets dropped later by `sanitizeObjectives`.
+ */
+function rebaselineRunScopedObjectives(
+  objectives: readonly ActiveObjective[],
+  postResetStats: Record<ObjectiveStatKey, number>,
+  postResetIncomeRate: number,
+): ActiveObjective[] {
+  return objectives.map((active) => {
+    const config = objectiveConfigById(active.configId)
+    if (!config) return active
+    if (OBJECTIVE_STAT_SCOPES[config.statTracked] !== 'run') return active
+    // An income-scaled TARGET also has to be re-resolved, not just the
+    // baseline: a target sized against the pre-prestige economy (millions of
+    // Revenue per second) carried into a freshly-reset one takes tens of
+    // minutes instead of its designed ~90 seconds. Re-resolving is only safe
+    // because resolveObjectiveTarget now floors the RATE
+    // (OBJECTIVE_FLOOR_INCOME_RATE) — before that fix, re-resolving here
+    // would have produced a target of 1, since resetForLegacy clears every
+    // manager and so zeroes the measured rate. An adversarial review raised
+    // both halves of this; they only resolve together.
+    const target =
+      config.targetKind === 'incomeRateSeconds'
+        ? resolveObjectiveTarget(config, postResetIncomeRate)
+        : active.target
+    return { ...active, baseline: postResetStats[config.statTracked] ?? 0, target }
+  })
+}
+
+/**
+ * The one call every tick branch makes: derives the objective stats record
+ * from the post-update state, then grants/refills via
+ * `applyCompletedObjectives`. Exists so all four tick branches (soccer and
+ * baseball × completion and non-completion) share ONE wiring path rather
+ * than four near-identical copies — the same reason
+ * `applyEarnedAchievements` is shared across those same four sites.
+ *
+ * Called from BOTH branches, not just completion, deliberately: objectives
+ * track stats that move on EVERY tick (franchiseEarnings, and
+ * totalTierLevels/tiersUnlocked which move on purchases), not only on match
+ * completion, so a completion-only check would leave an objective sitting
+ * finished-but-ungranted until the next match happened to end. This is the
+ * same lesson `applyEarnedAchievements`' own doc comment records.
+ */
+function resolveObjectivesForState(
+  objectives: readonly ActiveObjective[],
+  tiers: { unlocked: boolean; level: number; cumulativeRevenue: number }[],
+  baseballTiers: { unlocked: boolean; level: number; cumulativeRevenue: number }[],
+  lifetimeStats: LifetimeStats,
+  prestigeCount: number,
+  baseRevenue: number,
+  getIncomeRatePerSecond: () => number,
+): { objectives: ActiveObjective[]; revenue: number; completedCount: number } {
+  const stats = selectObjectiveStats(tiers, baseballTiers, lifetimeStats, prestigeCount)
+  return applyCompletedObjectives(objectives, stats, baseRevenue, getIncomeRatePerSecond)
+}
+
 /** Checks and grants any achievements that newly qualify given the current
  *  value of every tracked lifetime stat, applying rewards atomically.
  *  Deliberately called from BOTH of tickTier()'s branches below (not just
@@ -432,23 +696,16 @@ function applyEarnedAchievements(
     } else if (reward.type === 'legacyPoints') {
       legacyPoints += reward.amount
     } else if (reward.type === 'scaledRevenue') {
-      // `Number.isFinite` guard, not just `Math.max` alone — an adversarial
-      // review caught that `Math.max(NaN, minAmount)` evaluates to `NaN` in
-      // JS, not `minAmount`, so `minAmount`'s own doc comment promise ("a
-      // floor beneath which this reward can never fall") would silently
-      // NOT hold against a corrupted rate (e.g. a hand-edited save with a
-      // non-finite `level` on ANY tier of either sport, even one the player
-      // never touches, poisoning `currentAggregateIncomeRatePerSecond`'s
-      // sum for every future achievement grant, not just that one tier's
-      // own future ticks). Collapsing a non-finite rate to a 0-Revenue
-      // scaled amount BEFORE the `Math.max` means the floor always applies
-      // cleanly instead — matching the same `Number.isFinite`-over-`typeof`
-      // defensive pattern `sanitizeLifetimeStats` already established for
-      // exactly this class of "never trust a persisted/computed number"
-      // case.
-      const rawRate = getIncomeRatePerSecond()
-      const scaledAmount = Number.isFinite(rawRate) ? Math.round(reward.incomeRateSeconds * rawRate) : 0
-      revenue += Math.max(scaledAmount, reward.minAmount)
+      // Routed through the SHARED scaledRevenueReward (engine/economy.ts) —
+      // the same function the Objectives system grants its rewards with, so
+      // the two reward systems cannot ship drifting copies of this formula.
+      // That helper also owns the non-finite-rate guard and the floor
+      // semantics; see its doc comment for why both matter.
+      revenue += scaledRevenueReward(
+        reward.incomeRateSeconds,
+        reward.minAmount,
+        getIncomeRatePerSecond(),
+      )
     } else {
       assertNeverRewardType(reward)
     }
@@ -531,6 +788,15 @@ interface GameState {
   legacy: LegacyState
   lifetimeStats: LifetimeStats
   achievements: AchievementsState
+  /**
+   * The 2-3 currently-assigned short-term Objectives shown on the Hub (see
+   * engine/objectives.ts and CLAUDE.md's "Objectives" section). Persisted,
+   * because each entry carries the BASELINE captured when it was assigned —
+   * that baseline is the whole mechanism by which "win 5 MORE matches" means
+   * anything without a session concept, so losing it on reload would silently
+   * restart or corrupt every in-flight objective.
+   */
+  objectives: ActiveObjective[]
   notifications: MilestoneNotification[]
   tickTier: (tierId: string) => void
   upgradeTier: (tierId: string) => void
@@ -575,7 +841,7 @@ interface GameState {
  * resolved outcome, so tolerant reads are the right fix there, not a
  * migration step here.
  */
-const CURRENT_SCHEMA_VERSION = 6
+const CURRENT_SCHEMA_VERSION = 7
 
 /**
  * SCHEMA_MIGRATIONS[v] transforms a persisted state KNOWN to be shaped like
@@ -798,6 +1064,68 @@ const SCHEMA_MIGRATIONS: Record<number, (state: any) => any> = {
       achievements: { earnedIds: earnedIds.filter((id: string) => !baseballAchievementIds.has(id)) },
     }
   },
+  // Version 6 -> 7: the Objectives system (see engine/objectives.ts and
+  // CLAUDE.md's "Objectives" section) adds a new persisted `objectives`
+  // array — a genuinely new field in `partialize`, which is exactly the case
+  // this project's schema-versioning convention exists for.
+  //
+  // An existing save must arrive with a FULL, VALID set of objectives, not
+  // an empty/broken one, so this assigns them here rather than relying on a
+  // later self-heal. Crucially their baselines are captured from THIS SAVE'S
+  // CURRENT stats, not from zero: a veteran save has hundreds of wins and
+  // dozens of tier levels banked, and baselining at 0 would hand them 2-3
+  // objectives that are all instantly complete (and would then pay out on
+  // the very next tick for work done long before the system existed).
+  //
+  // Everything the baseline needs is derived through the same shared
+  // `selectObjectiveStats` every later check uses. Both tier arrays are treated as
+  // empty unless they're already exactly the expected length (mirroring
+  // merge()'s own guard and SCHEMA_MIGRATIONS[5]), and the whole thing is
+  // try/caught, because an uncaught throw in a migration step is swallowed
+  // by zustand's persist hydrate and DISCARDS THE ENTIRE MIGRATION — the
+  // same failure mode SCHEMA_MIGRATIONS[5]'s own comment documents. On any
+  // throw the save still migrates, just with objectives baselined at zero
+  // for whichever stats couldn't be read; `ensureObjectives` on the next
+  // tick then tops up anything missing.
+  6: (state: any) => {
+    const safeSoccerTiers =
+      Array.isArray(state?.tiers) && state.tiers.length === SOCCER_VENTURE_TIERS.length ? state.tiers : []
+    const safeBaseballTiers =
+      Array.isArray(state?.baseballTiers) && state.baseballTiers.length === BASEBALL_VENTURE_TIERS.length
+        ? state.baseballTiers
+        : []
+    const permanentUpgrades = state?.legacy?.permanentUpgrades ?? createInitialPermanentUpgrades()
+    const prestigeCount = Number.isFinite(state?.legacy?.prestigeCount) ? state.legacy.prestigeCount : 0
+
+    // selectObjectiveStats is fully null-tolerant, so it stays OUTSIDE the
+    // try — only currentAggregateIncomeRatePerSecond can throw (it
+    // dereferences `tier.unlocked`, which a null element in a right-length
+    // array breaks). Wrapping both together, as an earlier version did,
+    // meant one bad tier element discarded a perfectly computable stats
+    // snapshot and produced ZERO objectives. This is the same narrow-the-try
+    // shape SCHEMA_MIGRATIONS[5] already uses; an adversarial review caught
+    // that it hadn't been carried over.
+    const stats = selectObjectiveStats(
+      safeSoccerTiers,
+      safeBaseballTiers,
+      sanitizeLifetimeStats(state?.lifetimeStats),
+      prestigeCount,
+    )
+    let incomeRate = 0
+    try {
+      incomeRate = currentAggregateIncomeRatePerSecond(
+        safeSoccerTiers,
+        safeBaseballTiers,
+        globalRevenueMultiplier(permanentUpgrades),
+        sanitizeBaseballCostAnchorMultiplier(state?.baseballCostAnchorMultiplier),
+      )
+    } catch {
+      incomeRate = 0
+    }
+    const objectives = fillObjectives(sanitizeObjectives(state?.objectives), stats, incomeRate)
+
+    return { ...state, objectives }
+  },
 }
 
 function migrateGameState(persistedState: unknown, version: number): unknown {
@@ -864,6 +1192,10 @@ export const useGameStore = create<GameState>()(
       legacy: createInitialLegacy(),
       lifetimeStats: createInitialLifetimeStats(),
       achievements: createInitialAchievements(),
+      // A brand-new save gets its first full set of objectives immediately,
+      // baselined against real fresh-game state — so the Hub's Objectives
+      // section is never empty, even on the very first render.
+      objectives: createInitialObjectives(createInitialLegacy().permanentUpgrades),
       notifications: [],
 
       // Advances one tier's match by exactly one tick, via the same
@@ -943,12 +1275,35 @@ export const useGameStore = create<GameState>()(
                 ),
             )
 
+
+            // Objectives share this exact evaluation point with achievements
+            // (see resolveObjectivesForState) — same post-update state, same
+            // lazy income-rate thunk, same atomic set(). `granted.revenue`
+            // is threaded in as the base so both systems' rewards stack
+            // within one frame rather than one clobbering the other.
+            const objectiveResult = resolveObjectivesForState(
+              s.objectives,
+              updatedTiers,
+              s.baseballTiers,
+              { ...s.lifetimeStats, totalWins, soccerWins },
+              s.legacy.prestigeCount,
+              granted.revenue,
+              () =>
+                currentAggregateIncomeRatePerSecond(
+                  s.tiers,
+                  s.baseballTiers,
+                  globalRevenueMultiplier(s.legacy.permanentUpgrades),
+                  s.baseballCostAnchorMultiplier,
+                ),
+            )
+
             return {
               tiers: updatedTiers,
-              currencies: { revenue: granted.revenue },
+              currencies: { revenue: objectiveResult.revenue },
               lifetimeStats: { ...s.lifetimeStats, totalWins, soccerWins },
               achievements: granted.grantedCount ? { earnedIds: granted.earnedIds } : s.achievements,
               legacy: granted.grantedCount ? { ...s.legacy, legacyPoints: granted.legacyPoints } : s.legacy,
+              objectives: objectiveResult.objectives,
             }
           })
         } else {
@@ -990,11 +1345,34 @@ export const useGameStore = create<GameState>()(
                 ),
             )
 
+
+            // Objectives share this exact evaluation point with achievements
+            // (see resolveObjectivesForState) — same post-update state, same
+            // lazy income-rate thunk, same atomic set(). `granted.revenue`
+            // is threaded in as the base so both systems' rewards stack
+            // within one frame rather than one clobbering the other.
+            const objectiveResult = resolveObjectivesForState(
+              s.objectives,
+              updatedTiers,
+              s.baseballTiers,
+              s.lifetimeStats,
+              s.legacy.prestigeCount,
+              granted.revenue,
+              () =>
+                currentAggregateIncomeRatePerSecond(
+                  s.tiers,
+                  s.baseballTiers,
+                  globalRevenueMultiplier(s.legacy.permanentUpgrades),
+                  s.baseballCostAnchorMultiplier,
+                ),
+            )
+
             return {
               tiers: updatedTiers,
-              currencies: { revenue: granted.revenue },
+              currencies: { revenue: objectiveResult.revenue },
               achievements: granted.grantedCount ? { earnedIds: granted.earnedIds } : s.achievements,
               legacy: granted.grantedCount ? { ...s.legacy, legacyPoints: granted.legacyPoints } : s.legacy,
+              objectives: objectiveResult.objectives,
             }
           })
         }
@@ -1023,10 +1401,30 @@ export const useGameStore = create<GameState>()(
         )
 
         set((s) => {
+          const nextTiers = s.tiers.map((t, i) => (i === tierIndex ? { ...t, level: nextLevel } : t))
+          // A purchase moves `totalTierLevels`, which objectives track — so
+          // objectives MUST be resolved here, not only on the tick path. See
+          // resolveObjectivesForState's own doc comment.
+          const resolved = resolveObjectivesForState(
+            s.objectives,
+            nextTiers,
+            s.baseballTiers,
+            s.lifetimeStats,
+            s.legacy.prestigeCount,
+            s.currencies.revenue - cost,
+            () =>
+              currentAggregateIncomeRatePerSecond(
+                nextTiers,
+                s.baseballTiers,
+                globalRevenueMultiplier(s.legacy.permanentUpgrades),
+                s.baseballCostAnchorMultiplier,
+              ),
+          )
           if (crossedMilestones.length === 0) {
             return {
-              currencies: { revenue: s.currencies.revenue - cost },
-              tiers: s.tiers.map((t, i) => (i === tierIndex ? { ...t, level: nextLevel } : t)),
+              currencies: { revenue: resolved.revenue },
+              tiers: nextTiers,
+              objectives: resolved.objectives,
             }
           }
           let nextId = s.notifications.length ? Math.max(...s.notifications.map((n) => n.id)) + 1 : 1
@@ -1035,8 +1433,9 @@ export const useGameStore = create<GameState>()(
             message: `${SOCCER_VENTURE_TIERS[tierIndex].name} Revenue 2x!`,
           }))
           return {
-            currencies: { revenue: s.currencies.revenue - cost },
-            tiers: s.tiers.map((t, i) => (i === tierIndex ? { ...t, level: nextLevel } : t)),
+            currencies: { revenue: resolved.revenue },
+            tiers: nextTiers,
+            objectives: resolved.objectives,
             notifications: [...s.notifications, ...newNotifications],
           }
         })
@@ -1082,10 +1481,31 @@ export const useGameStore = create<GameState>()(
         )
         if (currencies.revenue < cost) return
 
-        set((s) => ({
-          currencies: { revenue: s.currencies.revenue - cost },
-          tiers: s.tiers.map((t, i) => (i === tierIndex ? { ...t, unlocked: true } : t)),
-        }))
+        set((s) => {
+          const nextTiers = s.tiers.map((t, i) => (i === tierIndex ? { ...t, unlocked: true } : t))
+          // A purchase moves a stat objectives track (tier levels / unlocked
+          // count), so objectives resolve here too — not only on ticks.
+          const resolved = resolveObjectivesForState(
+            s.objectives,
+            nextTiers,
+            s.baseballTiers,
+            s.lifetimeStats,
+            s.legacy.prestigeCount,
+            s.currencies.revenue - cost,
+            () =>
+              currentAggregateIncomeRatePerSecond(
+                nextTiers,
+                s.baseballTiers,
+                globalRevenueMultiplier(s.legacy.permanentUpgrades),
+                s.baseballCostAnchorMultiplier,
+              ),
+          )
+          return {
+            currencies: { revenue: resolved.revenue },
+            tiers: nextTiers,
+            objectives: resolved.objectives,
+          }
+        })
       },
 
       // Baseball's own tick/upgrade/hire-manager/unlock actions — the
@@ -1167,12 +1587,35 @@ export const useGameStore = create<GameState>()(
                   s.baseballCostAnchorMultiplier,
                 ),
             )
+
+            // Objectives share this exact evaluation point with achievements
+            // (see resolveObjectivesForState) — same post-update state, same
+            // lazy income-rate thunk, same atomic set(). `granted.revenue`
+            // is threaded in as the base so both systems' rewards stack
+            // within one frame rather than one clobbering the other.
+            const objectiveResult = resolveObjectivesForState(
+              s.objectives,
+              s.tiers,
+              updatedTiers,
+              { ...s.lifetimeStats, totalWins, baseballWins },
+              s.legacy.prestigeCount,
+              granted.revenue,
+              () =>
+                currentAggregateIncomeRatePerSecond(
+                  s.tiers,
+                  s.baseballTiers,
+                  globalRevenueMultiplier(s.legacy.permanentUpgrades),
+                  s.baseballCostAnchorMultiplier,
+                ),
+            )
+
             return {
               baseballTiers: updatedTiers,
-              currencies: { revenue: granted.revenue },
+              currencies: { revenue: objectiveResult.revenue },
               lifetimeStats: { ...s.lifetimeStats, totalWins, baseballWins },
               achievements: granted.grantedCount ? { earnedIds: granted.earnedIds } : s.achievements,
               legacy: granted.grantedCount ? { ...s.legacy, legacyPoints: granted.legacyPoints } : s.legacy,
+              objectives: objectiveResult.objectives,
             }
           })
         } else {
@@ -1199,11 +1642,34 @@ export const useGameStore = create<GameState>()(
                   s.baseballCostAnchorMultiplier,
                 ),
             )
+
+            // Objectives share this exact evaluation point with achievements
+            // (see resolveObjectivesForState) — same post-update state, same
+            // lazy income-rate thunk, same atomic set(). `granted.revenue`
+            // is threaded in as the base so both systems' rewards stack
+            // within one frame rather than one clobbering the other.
+            const objectiveResult = resolveObjectivesForState(
+              s.objectives,
+              s.tiers,
+              updatedTiers,
+              s.lifetimeStats,
+              s.legacy.prestigeCount,
+              granted.revenue,
+              () =>
+                currentAggregateIncomeRatePerSecond(
+                  s.tiers,
+                  s.baseballTiers,
+                  globalRevenueMultiplier(s.legacy.permanentUpgrades),
+                  s.baseballCostAnchorMultiplier,
+                ),
+            )
+
             return {
               baseballTiers: updatedTiers,
-              currencies: { revenue: granted.revenue },
+              currencies: { revenue: objectiveResult.revenue },
               achievements: granted.grantedCount ? { earnedIds: granted.earnedIds } : s.achievements,
               legacy: granted.grantedCount ? { ...s.legacy, legacyPoints: granted.legacyPoints } : s.legacy,
+              objectives: objectiveResult.objectives,
             }
           })
         }
@@ -1229,10 +1695,31 @@ export const useGameStore = create<GameState>()(
         )
 
         set((s) => {
+          const nextBaseballTiers = s.baseballTiers.map((t, i) =>
+            i === tierIndex ? { ...t, level: nextLevel } : t,
+          )
+          // A purchase moves a stat objectives track (tier levels / unlocked
+          // count), so objectives resolve here too — not only on ticks.
+          const resolved = resolveObjectivesForState(
+            s.objectives,
+            s.tiers,
+            nextBaseballTiers,
+            s.lifetimeStats,
+            s.legacy.prestigeCount,
+            s.currencies.revenue - cost,
+            () =>
+              currentAggregateIncomeRatePerSecond(
+                s.tiers,
+                nextBaseballTiers,
+                globalRevenueMultiplier(s.legacy.permanentUpgrades),
+                s.baseballCostAnchorMultiplier,
+              ),
+          )
           if (crossedMilestones.length === 0) {
             return {
-              currencies: { revenue: s.currencies.revenue - cost },
-              baseballTiers: s.baseballTiers.map((t, i) => (i === tierIndex ? { ...t, level: nextLevel } : t)),
+              currencies: { revenue: resolved.revenue },
+              baseballTiers: nextBaseballTiers,
+              objectives: resolved.objectives,
             }
           }
           let nextId = s.notifications.length ? Math.max(...s.notifications.map((n) => n.id)) + 1 : 1
@@ -1241,8 +1728,9 @@ export const useGameStore = create<GameState>()(
             message: `${config.name} Revenue 2x!`,
           }))
           return {
-            currencies: { revenue: s.currencies.revenue - cost },
-            baseballTiers: s.baseballTiers.map((t, i) => (i === tierIndex ? { ...t, level: nextLevel } : t)),
+            currencies: { revenue: resolved.revenue },
+            baseballTiers: nextBaseballTiers,
+            objectives: resolved.objectives,
             notifications: [...s.notifications, ...newNotifications],
           }
         })
@@ -1284,10 +1772,33 @@ export const useGameStore = create<GameState>()(
         )
         if (currencies.revenue < cost) return
 
-        set((s) => ({
-          currencies: { revenue: s.currencies.revenue - cost },
-          baseballTiers: s.baseballTiers.map((t, i) => (i === tierIndex ? { ...t, unlocked: true } : t)),
-        }))
+        set((s) => {
+          const nextBaseballTiers = s.baseballTiers.map((t, i) =>
+            i === tierIndex ? { ...t, unlocked: true } : t,
+          )
+          // A purchase moves a stat objectives track (tier levels / unlocked
+          // count), so objectives resolve here too — not only on ticks.
+          const resolved = resolveObjectivesForState(
+            s.objectives,
+            s.tiers,
+            nextBaseballTiers,
+            s.lifetimeStats,
+            s.legacy.prestigeCount,
+            s.currencies.revenue - cost,
+            () =>
+              currentAggregateIncomeRatePerSecond(
+                s.tiers,
+                nextBaseballTiers,
+                globalRevenueMultiplier(s.legacy.permanentUpgrades),
+                s.baseballCostAnchorMultiplier,
+              ),
+          )
+          return {
+            currencies: { revenue: resolved.revenue },
+            baseballTiers: nextBaseballTiers,
+            objectives: resolved.objectives,
+          }
+        })
       },
 
       // Wipes saved progress back to a brand-new player, INCLUDING Legacy —
@@ -1318,6 +1829,10 @@ export const useGameStore = create<GameState>()(
           legacy: freshLegacy,
           lifetimeStats: createInitialLifetimeStats(),
           achievements: createInitialAchievements(),
+          // A fresh set, baselined against fresh-game state — same helper
+          // the store's own initial state uses, so a wiped save is
+          // indistinguishable from a brand-new one here too.
+          objectives: createInitialObjectives(freshLegacy.permanentUpgrades),
         })
       },
 
@@ -1409,6 +1924,33 @@ export const useGameStore = create<GameState>()(
               nextLegacy.permanentUpgrades,
             ),
             currencies: { revenue: startingRevenue(nextLegacy.permanentUpgrades) },
+            // Re-baseline the RUN-SCOPED objectives against the post-reset
+            // state, and leave lifetime-scoped ones (the win counters, which
+            // survive a prestige by design) exactly as they are.
+            //
+            // Without this, an in-flight run-scoped objective would be left
+            // holding a baseline captured from the pre-reset economy — e.g.
+            // "improve training 20 more times" baselined at 40 total levels,
+            // while the post-reset state has 22 — making its progress clamp
+            // at 0 forever, permanently unachievable. Re-baselining is the
+            // fix; the clamp in objectiveProgress is only a render-time
+            // safety net. Targets are deliberately NOT re-resolved: the
+            // player keeps the objective they were given, just measured from
+            // the new starting line.
+            objectives: rebaselineRunScopedObjectives(
+              s.objectives,
+              selectObjectiveStats(nextTiers, nextBaseballTiers, s.lifetimeStats, nextLegacy.prestigeCount),
+              currentAggregateIncomeRatePerSecond(
+                nextTiers,
+                nextBaseballTiers,
+                globalRevenueMultiplier(nextLegacy.permanentUpgrades),
+                computeBaseballCostAnchorMultiplier(
+                  nextTiers,
+                  nextBaseballTiers,
+                  nextLegacy.permanentUpgrades,
+                ),
+              ),
+            ),
           }
         })
       },
@@ -1501,6 +2043,7 @@ export const useGameStore = create<GameState>()(
         legacy: state.legacy,
         lifetimeStats: state.lifetimeStats,
         achievements: state.achievements,
+        objectives: state.objectives,
       }),
       // The `tiers`-array-length shape fix that used to live here moved
       // into SCHEMA_MIGRATIONS[0] above — a genuine data transformation by
@@ -1596,6 +2139,22 @@ export const useGameStore = create<GameState>()(
         if (!Array.isArray(merged.achievements?.earnedIds)) {
           merged.achievements = createInitialAchievements()
         }
+        // `objectives` gets the same never-trust-the-shape treatment, and
+        // for the same "a save already AT the current version skips
+        // migrate() entirely" reason — plus the repairs that need a live
+        // stats snapshot (dropping stale baselines, topping back up to a
+        // full set). Runs AFTER the tiers/lifetimeStats guards above so it
+        // measures against the already-repaired state.
+        merged.objectives = ensureObjectives(
+          merged.objectives,
+          merged.tiers,
+          merged.baseballTiers,
+          merged.lifetimeStats,
+          merged.legacy?.prestigeCount ?? 0,
+          merged.legacy?.permanentUpgrades ?? createInitialPermanentUpgrades(),
+          merged.baseballCostAnchorMultiplier,
+          currentState.objectives,
+        )
         return merged
       },
     },

@@ -75,3 +75,43 @@ export function expectedMatchRevenue(probabilities: Record<MatchOutcome, number>
     probabilities.loss * calculateMatchRevenue('loss', NEUTRAL_FACTOR)
   )
 }
+
+/**
+ * A Revenue reward expressed as "N seconds of the player's CURRENT aggregate
+ * income rate," floored at `minAmount`.
+ *
+ * THE SINGLE AUTHORITATIVE IMPLEMENTATION of income-rate-scaled rewards,
+ * shared by BOTH reward systems that grant them: achievements'
+ * `scaledRevenue` reward variant (engine/achievements.ts) and the Objectives
+ * system (engine/objectives.ts). It was originally inline inside the store's
+ * `applyEarnedAchievements`; it lives here — economy.ts, this project's
+ * documented "single isolated home for currency math" — so a second reward
+ * system literally cannot ship a second, subtly-different copy of it. This
+ * project has repeatedly been bitten by duplicated economy math drifting
+ * apart (see CLAUDE.md), and a reward formula is exactly that class of math.
+ *
+ * `Number.isFinite` guard, not just `Math.max` alone: `Math.max(NaN, min)`
+ * evaluates to `NaN` in JS, not `min`, so `minAmount`'s own promise ("a
+ * floor beneath which this reward can never fall") would silently NOT hold
+ * against a corrupted rate — e.g. a hand-edited save with a non-finite
+ * `level` on ANY tier of either sport poisons the aggregate income sum for
+ * every future grant, not just that tier's own. Collapsing a non-finite rate
+ * to a 0 scaled amount BEFORE the `Math.max` makes the floor always apply
+ * cleanly instead.
+ *
+ * The floor genuinely matters, and not only for corruption: a player who got
+ * here via manual clicking alone, with no manager EVER hired on any tier of
+ * any sport, has an aggregate rate of exactly 0 by design
+ * (tierIncomeRatePerSecond returns 0 for a manager-less tier — manual
+ * clicking isn't a "rate"), so without the floor they'd be granted nothing.
+ */
+export function scaledRevenueReward(
+  incomeRateSeconds: number,
+  minAmount: number,
+  incomeRatePerSecond: number,
+): number {
+  const scaledAmount = Number.isFinite(incomeRatePerSecond)
+    ? Math.round(incomeRateSeconds * incomeRatePerSecond)
+    : 0
+  return Math.max(scaledAmount, minAmount)
+}
